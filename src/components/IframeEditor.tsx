@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { useStore } from '../store';
-import { Bold, Italic, Underline as UnderlineIcon, List, ListOrdered, Undo, Redo, Wand2 } from 'lucide-react';
+import { Bold, Italic, Underline as UnderlineIcon, List, ListOrdered, Undo, Redo, Wand2, Scissors } from 'lucide-react';
 
 interface IframeEditorProps {
   planId: string;
@@ -15,11 +15,26 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
   const setupIframe = (doc: Document) => {
     doc.designMode = 'on';
 
+    const pageBreakStyle = `
+      .page-break {
+        display: block !important; height: 24px !important; background-color: #f3f4f6 !important;
+        border-top: 2px dashed #9ca3af !important; border-bottom: 2px dashed #9ca3af !important;
+        margin: 20px 0 !important; text-align: center !important; color: #6b7280 !important;
+        font-size: 12px !important; font-weight: bold !important; line-height: 20px !important;
+        page-break-after: always !important; user-select: none;
+      }
+      .page-break::before { content: "📄 BATAS HALAMAN (Teks setelah ini akan pindah ke halaman baru saat PDF/Print)"; }
+      @media print {
+        .page-break { height: 0 !important; border: none !important; background: transparent !important; color: transparent !important; margin: 0 !important; }
+        .page-break::before { content: ""; }
+      }
+    `;
+
     // Inject hidden scrollbar CSS if not present
     if (!doc.querySelector('#iframe-custom-style')) {
       const style = doc.createElement('style');
       style.id = 'iframe-custom-style';
-      style.innerHTML = 'html, body { overflow-y: hidden !important; }';
+      style.innerHTML = 'html, body { overflow-y: hidden !important; } ' + pageBreakStyle;
       doc.head?.appendChild(style);
     }
 
@@ -70,6 +85,22 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     if (doc.body && doc.body.innerHTML.length > 0) return;
 
     let content = plan.content;
+    
+    const pageBreakStyle = `
+      .page-break {
+        display: block !important; height: 24px !important; background-color: #f3f4f6 !important;
+        border-top: 2px dashed #9ca3af !important; border-bottom: 2px dashed #9ca3af !important;
+        margin: 20px 0 !important; text-align: center !important; color: #6b7280 !important;
+        font-size: 12px !important; font-weight: bold !important; line-height: 20px !important;
+        page-break-after: always !important; user-select: none;
+      }
+      .page-break::before { content: "📄 BATAS HALAMAN (Teks setelah ini akan pindah ke halaman baru saat PDF/Print)"; }
+      @media print {
+        .page-break { height: 0 !important; border: none !important; background: transparent !important; color: transparent !important; margin: 0 !important; }
+        .page-break::before { content: ""; }
+      }
+    `;
+
     // Auto-inject MathJax if not present just in case
     if (!content.includes('MathJax')) {
        content = `
@@ -84,11 +115,12 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
          MathJax = { tex: { inlineMath: [['$', '$'], ['\\\\(', '\\\\)']] } }
        </script>
        <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+       <style id="iframe-custom-style">html, body { overflow-y: hidden !important; } ${pageBreakStyle}</style>
        </head><body>${content}</body></html>`;
     } else {
        // Make sure old content has the hidden scrollbar
-       if (!content.includes('overflow-y: hidden')) {
-         content = content.replace('</head>', '<style id="iframe-custom-style">html, body { overflow-y: hidden !important; }</style></head>');
+       if (!content.includes('iframe-custom-style')) {
+         content = content.replace('</head>', `<style id="iframe-custom-style">html, body { overflow-y: hidden !important; } ${pageBreakStyle}</style></head>`);
        }
     }
 
@@ -145,6 +177,11 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     }
   };
 
+  const handleInsertPageBreak = () => {
+    const html = '<div class="page-break"></div><p><br></p>';
+    exec('insertHTML', html);
+  };
+
   return (
     <div className="flex flex-col h-full items-center w-full">
       {/* Toolbar */}
@@ -171,6 +208,11 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
         </button>
         <button onClick={() => exec('redo')} className="p-2 rounded hover:bg-gray-100 text-gray-700" title="Redo">
           <Redo className="w-5 h-5" />
+        </button>
+        <div className="w-px h-6 bg-gray-300 self-center mx-1"></div>
+        <button onClick={handleInsertPageBreak} className="flex items-center gap-2 p-2 px-3 rounded hover:bg-orange-100 text-orange-700 font-medium" title="Batas Halaman (Page Break)">
+          <Scissors className="w-5 h-5" />
+          <span>Batas Halaman</span>
         </button>
         <div className="w-px h-6 bg-gray-300 self-center mx-1"></div>
         <button onClick={handleMagicPaste} className="flex items-center gap-2 p-2 px-3 rounded hover:bg-purple-100 text-purple-700 font-medium" title="Paste HTML bersih">

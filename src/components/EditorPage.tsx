@@ -41,7 +41,8 @@ export const EditorPage: React.FC = () => {
       filename:     `${plan.title}.pdf`,
       image:        { type: 'jpeg', quality: 0.98 },
       html2canvas:  { scale: 2, useCORS: true },
-      jsPDF:        { unit: 'mm', format: format, orientation: 'portrait' }
+      jsPDF:        { unit: 'mm', format: format, orientation: 'portrait' },
+      pagebreak:    { mode: ['css', 'legacy'] }
     };
     html2pdf().set(opt).from(targetElement).save();
   };
