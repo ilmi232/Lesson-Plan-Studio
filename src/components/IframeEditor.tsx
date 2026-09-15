@@ -29,7 +29,7 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
        <!DOCTYPE html><html><head>
        <meta charset="utf-8">
        <style>
-         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; line-height: 1.5; }
+         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; line-height: 1.5; overflow-y: hidden; }
          table { border-collapse: collapse; width: 100%; }
          table, th, td { border: 1px solid black; padding: 8px; }
        </style>
@@ -38,6 +38,10 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
        </script>
        <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
        </head><body>${content}</body></html>`;
+    } else {
+       // If it already has HTML, we should still try to hide the iframe scrollbar
+       // We can inject a style tag before closing head
+       content = content.replace('</head>', '<style>html, body { overflow-y: hidden !important; }</style></head>');
     }
 
     doc.open();
@@ -46,14 +50,32 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
 
     doc.designMode = 'on';
 
+    const adjustHeight = () => {
+      if (iframeRef.current && doc.body) {
+        iframeRef.current.style.height = '0px'; // Reset to shrink if needed
+        const newHeight = doc.body.scrollHeight;
+        iframeRef.current.style.height = `${newHeight + 50}px`; // Add padding bottom
+      }
+    };
+
     const handleInput = () => {
       updatePlan(planId, doc.documentElement.outerHTML);
+      adjustHeight();
     };
 
     doc.addEventListener('input', handleInput);
     
+    // Auto-resize on initial load and when images/mathjax load
+    setTimeout(adjustHeight, 100);
+    setTimeout(adjustHeight, 1000); // MathJax might take a moment
+    setTimeout(adjustHeight, 3000);
+
+    const observer = new MutationObserver(adjustHeight);
+    observer.observe(doc.body, { childList: true, subtree: true, characterData: true, attributes: true });
+    
     return () => {
       doc.removeEventListener('input', handleInput);
+      observer.disconnect();
     };
   }, [planId]); // Do not add plan.content to dependencies to avoid re-rendering on every keystroke
 
