@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React, { useState } from 'react';
 import { useStore } from '../store';
-import { TiptapEditor } from './TiptapEditor';
+import { IframeEditor } from './IframeEditor';
 import { ArrowLeft, Download, FileType, Search } from 'lucide-react';
 import html2pdf from 'html2pdf.js';
 
@@ -19,10 +19,14 @@ export const EditorPage: React.FC = () => {
   };
 
   const handleExportPDF = () => {
-    const element = document.getElementById('print-content')?.querySelector('.ProseMirror');
+    const element = document.getElementById('print-content');
     if (!element) return;
     
-    // Convert generic paper size strings to formats supported by jsPDF or specify dimensions
+    // We need to pass the inner document body to html2pdf if we want it to render correctly,
+    // or we can pass the iframe's document body
+    const iframe = element.querySelector('iframe');
+    const targetElement = iframe ? iframe.contentDocument.documentElement : element;
+
     let format: string | number[] = 'a4';
     if (paperSize === 'f4') {
       format = [215.9, 330.2]; // Custom size in mm
@@ -39,11 +43,14 @@ export const EditorPage: React.FC = () => {
       html2canvas:  { scale: 2, useCORS: true },
       jsPDF:        { unit: 'mm', format: format, orientation: 'portrait' }
     };
-    html2pdf().set(opt).from(element).save();
+    html2pdf().set(opt).from(targetElement).save();
   };
 
   const handleExportDocx = () => {
-    const htmlString = `
+    // If the content is already a full HTML string with head/body, we can use it directly
+    let htmlString = plan.content;
+    if (!htmlString.includes('<html')) {
+       htmlString = `
       <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
         <head>
           <meta charset="utf-8">
@@ -68,6 +75,7 @@ export const EditorPage: React.FC = () => {
         </body>
       </html>
     `;
+    }
     
     const blob = new Blob(['\ufeff', htmlString], { type: 'application/msword' });
     const url = URL.createObjectURL(blob);
@@ -82,10 +90,6 @@ export const EditorPage: React.FC = () => {
 
   const handleReplace = () => {
     if (!findText) return;
-    // Basic string replace in the HTML content
-    // Note: this is a simple implementation and might break HTML tags if finding generic words like "div".
-    // A robust solution would use tiptap commands, but for simple text, manipulating the string is a quick start.
-    // However, it's safer to use DOMParser to only replace text nodes.
     const parser = new DOMParser();
     const doc = parser.parseFromString(plan.content, 'text/html');
     
@@ -102,10 +106,7 @@ export const EditorPage: React.FC = () => {
     }
 
     if (hasChanges) {
-      updatePlan(plan.id, doc.body.innerHTML);
-      // alert('Teks berhasil diganti!');
-    } else {
-      // alert('Teks tidak ditemukan.');
+      updatePlan(plan.id, doc.documentElement.outerHTML);
     }
     setShowFindReplace(false);
   };
@@ -187,7 +188,7 @@ export const EditorPage: React.FC = () => {
       )}
 
       <div className="flex-1 overflow-hidden relative">
-        <TiptapEditor planId={plan.id} />
+        <IframeEditor planId={plan.id} />
       </div>
     </div>
   );

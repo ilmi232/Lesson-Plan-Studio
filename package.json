@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
+    "@tinymce/tinymce-react": "^6.3.0",
     "@tiptap/extension-table": "^3.31.3",
     "@tiptap/extension-table-cell": "^3.31.3",
     "@tiptap/extension-table-header": "^3.31.3",
@@ -26,6 +27,7 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "tailwindcss": "^4.3.3",
+    "tinymce": "^8.9.1",
     "uuid": "^14.0.2",
     "zustand": "^5.0.15"
   },
