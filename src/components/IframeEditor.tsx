@@ -58,7 +58,7 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
   }, [planId]); // Do not add plan.content to dependencies to avoid re-rendering on every keystroke
 
   // Paper Size Styles
-  let paperStyle = {};
+  let paperStyle: React.CSSProperties = {};
   switch (paperSize) {
     case 'f4': paperStyle = { minHeight: '330.2mm', width: '215.9mm' }; break;
     case 'letter': paperStyle = { minHeight: '279.4mm', width: '215.9mm' }; break;
@@ -132,10 +132,10 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
 
       {/* Editor Area */}
       <div className="w-full bg-[#e5e7eb] overflow-y-auto pb-20 pt-4 flex-1">
-          <div className="mx-auto bg-white shadow-lg" style={{ ...paperStyle, padding: 0 }} id="print-content">
+          <div className="mx-auto bg-white shadow-lg flex flex-col" style={{ ...paperStyle, padding: 0 }} id="print-content">
              <iframe 
                ref={iframeRef} 
-               style={{ width: '100%', height: '100%', border: 'none', display: 'block' }} 
+               style={{ width: '100%', flex: '1 1 auto', border: 'none', display: 'block', minHeight: paperStyle.minHeight }} 
                title="Editor"
              />
           </div>
