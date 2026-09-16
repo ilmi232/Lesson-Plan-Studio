@@ -41,14 +41,24 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     // --- TABLE RESIZER PLUGIN ---
     if (!(doc as any)._hasTableResizer) {
       let isResizing = false;
-      let resizableCell: HTMLElement | null = null;
+      let currentCell: HTMLElement | null = null;
+      let nextCell: HTMLElement | null = null;
       let startX = 0;
       let startWidth = 0;
+      let startNextWidth = 0;
 
       doc.addEventListener('mousemove', (e) => {
-        if (isResizing && resizableCell) {
+        if (isResizing && currentCell) {
           const dx = e.clientX - startX;
-          resizableCell.style.width = `${Math.max(20, startWidth + dx)}px`;
+          const newWidth = Math.max(20, startWidth + dx);
+          currentCell.style.width = `${newWidth}px`;
+          currentCell.style.minWidth = `${newWidth}px`;
+          
+          if (nextCell) {
+             const newNextWidth = Math.max(20, startNextWidth - dx);
+             nextCell.style.width = `${newNextWidth}px`;
+             nextCell.style.minWidth = `${newNextWidth}px`;
+          }
           return;
         }
 
@@ -57,23 +67,54 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
           const rect = target.getBoundingClientRect();
           if (e.clientX > rect.right - 10 && e.clientX <= rect.right) {
             target.style.cursor = 'col-resize';
-            resizableCell = target;
+            currentCell = target;
+          } else if (e.clientX < rect.left + 10 && e.clientX >= rect.left) {
+            const prev = target.previousElementSibling as HTMLElement;
+            if (prev) {
+              target.style.cursor = 'col-resize';
+              currentCell = prev;
+            } else {
+              target.style.cursor = 'text';
+              currentCell = null;
+            }
           } else {
             target.style.cursor = 'text';
-            resizableCell = null;
+            currentCell = null;
           }
-        } else if (resizableCell) {
-          resizableCell.style.cursor = 'text';
-          resizableCell = null;
+        } else if (currentCell && !isResizing) {
+          currentCell.style.cursor = 'text';
+          currentCell = null;
         }
       });
 
       doc.addEventListener('mousedown', (e) => {
-        if (resizableCell) {
+        if (currentCell) {
           isResizing = true;
           startX = e.clientX;
-          const styles = doc.defaultView?.getComputedStyle(resizableCell);
+          nextCell = currentCell.nextElementSibling as HTMLElement;
+          
+          const styles = doc.defaultView?.getComputedStyle(currentCell);
           startWidth = parseInt(styles?.width || '0', 10);
+          
+          if (nextCell) {
+            const nextStyles = doc.defaultView?.getComputedStyle(nextCell);
+            startNextWidth = parseInt(nextStyles?.width || '0', 10);
+          }
+          
+          // Force fixed layout on the table to ensure widths are respected
+          const table = currentCell.closest('table');
+          if (table && table.style.tableLayout !== 'fixed') {
+             // Extract current computed widths of all cells in the first row to freeze them
+             const firstRow = table.rows[0];
+             if (firstRow) {
+                Array.from(firstRow.cells).forEach(c => {
+                   const s = doc.defaultView?.getComputedStyle(c);
+                   c.style.width = s?.width || 'auto';
+                });
+             }
+             table.style.tableLayout = 'fixed';
+          }
+          
           e.preventDefault();
         }
       });
@@ -81,6 +122,8 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
       doc.addEventListener('mouseup', () => {
         if (isResizing) {
           isResizing = false;
+          currentCell = null;
+          nextCell = null;
           doc.dispatchEvent(new Event('input', { bubbles: true }));
         }
       });
