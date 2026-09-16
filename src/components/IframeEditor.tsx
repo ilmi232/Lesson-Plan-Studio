@@ -42,22 +42,55 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     if (!(doc as any)._hasTableResizer) {
       let isResizing = false;
       let currentCell: HTMLElement | null = null;
-      let nextCell: HTMLElement | null = null;
       let startX = 0;
-      let startWidth = 0;
-      let startNextWidth = 0;
+
+      const getCols = (table: HTMLTableElement) => {
+        let colgroup = table.querySelector('colgroup');
+        if (!colgroup) {
+          colgroup = doc.createElement('colgroup');
+          let maxCols = 0;
+          let templateRow = null;
+          for (let i = 0; i < table.rows.length; i++) {
+             let cols = 0;
+             for (let j = 0; j < table.rows[i].cells.length; j++) {
+               cols += table.rows[i].cells[j].colSpan || 1;
+             }
+             if (cols > maxCols) {
+               maxCols = cols;
+               templateRow = table.rows[i];
+             }
+          }
+          for (let i = 0; i < maxCols; i++) {
+             colgroup.appendChild(doc.createElement('col'));
+          }
+          if (templateRow) {
+             let colIdx = 0;
+             for (let i = 0; i < templateRow.cells.length; i++) {
+                const c = templateRow.cells[i];
+                const span = c.colSpan || 1;
+                const w = parseInt(doc.defaultView?.getComputedStyle(c).width || '0', 10) / span;
+                for (let s = 0; s < span; s++) {
+                   const col = colgroup.children[colIdx] as HTMLElement;
+                   if (col) col.style.width = w + 'px';
+                   colIdx++;
+                }
+             }
+          }
+          table.insertBefore(colgroup, table.firstChild);
+        }
+        return Array.from(colgroup.querySelectorAll('col'));
+      };
 
       doc.addEventListener('mousemove', (e) => {
-        if (isResizing && currentCell) {
+        if (isResizing && (doc as any)._resizeCols) {
           const dx = e.clientX - startX;
-          const newWidth = Math.max(20, startWidth + dx);
-          currentCell.style.width = `${newWidth}px`;
-          currentCell.style.minWidth = `${newWidth}px`;
+          const state = (doc as any)._resizeCols;
           
-          if (nextCell) {
-             const newNextWidth = Math.max(20, startNextWidth - dx);
-             nextCell.style.width = `${newNextWidth}px`;
-             nextCell.style.minWidth = `${newNextWidth}px`;
+          if (state.leftCol) {
+            state.leftCol.style.width = `${Math.max(20, state.startWidth + dx)}px`;
+          }
+          if (state.rightCol) {
+            state.rightCol.style.width = `${Math.max(20, state.startNextWidth - dx)}px`;
           }
           return;
         }
@@ -89,33 +122,41 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
 
       doc.addEventListener('mousedown', (e) => {
         if (currentCell) {
-          isResizing = true;
-          startX = e.clientX;
-          nextCell = currentCell.nextElementSibling as HTMLElement;
-          
-          const styles = doc.defaultView?.getComputedStyle(currentCell);
-          startWidth = parseInt(styles?.width || '0', 10);
-          
-          if (nextCell) {
-            const nextStyles = doc.defaultView?.getComputedStyle(nextCell);
-            startNextWidth = parseInt(nextStyles?.width || '0', 10);
-          }
-          
-          // Force fixed layout on the table to ensure widths are respected
           const table = currentCell.closest('table');
-          if (table && table.style.tableLayout !== 'fixed') {
-             // Extract current computed widths of all cells in the first row to freeze them
-             const firstRow = table.rows[0];
-             if (firstRow) {
-                Array.from(firstRow.cells).forEach(c => {
-                   const s = doc.defaultView?.getComputedStyle(c);
-                   c.style.width = s?.width || 'auto';
-                });
-             }
-             table.style.tableLayout = 'fixed';
+          if (!table) return;
+          
+          const cols = getCols(table);
+          
+          let colIndex = 0;
+          const row = currentCell.parentElement as HTMLTableRowElement;
+          for (let i = 0; i < row.cells.length; i++) {
+             if (row.cells[i] === currentCell) break;
+             colIndex += row.cells[i].colSpan || 1;
           }
           
-          e.preventDefault();
+          const currentCellSpan = (currentCell as HTMLTableCellElement).colSpan || 1;
+          const leftColIdx = colIndex + currentCellSpan - 1;
+          const rightColIdx = leftColIdx + 1;
+          
+          const leftCol = cols[leftColIdx] as HTMLElement;
+          const rightCol = cols[rightColIdx] as HTMLElement;
+          
+          if (leftCol) {
+            isResizing = true;
+            startX = e.clientX;
+            
+            const getWidth = (col: HTMLElement) => parseInt(col.style.width || doc.defaultView?.getComputedStyle(col).width || '0', 10);
+            
+            (doc as any)._resizeCols = {
+               leftCol,
+               rightCol,
+               startWidth: getWidth(leftCol),
+               startNextWidth: rightCol ? getWidth(rightCol) : 0
+            };
+            
+            table.style.tableLayout = 'fixed';
+            e.preventDefault();
+          }
         }
       });
 
@@ -123,7 +164,7 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
         if (isResizing) {
           isResizing = false;
           currentCell = null;
-          nextCell = null;
+          (doc as any)._resizeCols = null;
           doc.dispatchEvent(new Event('input', { bubbles: true }));
         }
       });
