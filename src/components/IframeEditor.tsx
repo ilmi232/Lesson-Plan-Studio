@@ -38,6 +38,57 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
       doc.head?.appendChild(style);
     }
 
+    // --- TABLE RESIZER PLUGIN ---
+    if (!(doc as any)._hasTableResizer) {
+      let isResizing = false;
+      let resizableCell: HTMLElement | null = null;
+      let startX = 0;
+      let startWidth = 0;
+
+      doc.addEventListener('mousemove', (e) => {
+        if (isResizing && resizableCell) {
+          const dx = e.clientX - startX;
+          resizableCell.style.width = `${Math.max(20, startWidth + dx)}px`;
+          return;
+        }
+
+        const target = e.target as HTMLElement;
+        if (target && (target.tagName === 'TD' || target.tagName === 'TH')) {
+          const rect = target.getBoundingClientRect();
+          if (e.clientX > rect.right - 10 && e.clientX <= rect.right) {
+            target.style.cursor = 'col-resize';
+            resizableCell = target;
+          } else {
+            target.style.cursor = 'text';
+            resizableCell = null;
+          }
+        } else if (resizableCell) {
+          resizableCell.style.cursor = 'text';
+          resizableCell = null;
+        }
+      });
+
+      doc.addEventListener('mousedown', (e) => {
+        if (resizableCell) {
+          isResizing = true;
+          startX = e.clientX;
+          const styles = doc.defaultView?.getComputedStyle(resizableCell);
+          startWidth = parseInt(styles?.width || '0', 10);
+          e.preventDefault();
+        }
+      });
+
+      doc.addEventListener('mouseup', () => {
+        if (isResizing) {
+          isResizing = false;
+          doc.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      });
+
+      (doc as any)._hasTableResizer = true;
+    }
+    // --- END TABLE RESIZER ---
+
     const adjustHeight = () => {
       if (iframeRef.current && doc.body) {
         iframeRef.current.style.height = '10px'; // Reset to force shrink if needed
@@ -182,6 +233,47 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     exec('insertHTML', html);
   };
 
+  const getSelectedCell = () => {
+    const doc = iframeRef.current?.contentDocument;
+    if (!doc) return null;
+    const selection = doc.getSelection();
+    if (!selection || selection.rangeCount === 0) return null;
+    let node: any = selection.anchorNode;
+    while (node && node.nodeName !== 'TD' && node.nodeName !== 'TH' && node.nodeName !== 'BODY') {
+      node = node.parentNode;
+    }
+    return (node && (node.nodeName === 'TD' || node.nodeName === 'TH')) ? node : null;
+  };
+
+  const handleTableAction = (action: string) => {
+    const cell = getSelectedCell();
+    if (!cell) return alert('Klik di dalam tabel terlebih dahulu!');
+    const row = cell.parentNode as HTMLTableRowElement;
+    const table = cell.closest('table') as HTMLTableElement;
+    const cellIndex = Array.prototype.indexOf.call(row.children, cell);
+    
+    if (action === 'addRow') {
+      const newRow = row.cloneNode(true) as HTMLTableRowElement;
+      Array.from(newRow.cells).forEach(c => c.innerHTML = '');
+      row.parentNode?.insertBefore(newRow, row.nextSibling);
+    } else if (action === 'delRow') {
+      row.parentNode?.removeChild(row);
+    } else if (action === 'addCol') {
+      Array.from(table.rows).forEach(r => {
+        const newCell = r.cells[cellIndex].cloneNode(true) as HTMLTableCellElement;
+        newCell.innerHTML = '';
+        r.insertBefore(newCell, r.cells[cellIndex].nextSibling);
+      });
+    } else if (action === 'delCol') {
+      Array.from(table.rows).forEach(r => {
+        if (r.cells[cellIndex]) r.removeChild(r.cells[cellIndex]);
+      });
+    } else if (action === 'delTable') {
+      table.parentNode?.removeChild(table);
+    }
+    iframeRef.current?.contentDocument?.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+
   return (
     <div className="flex flex-col h-full items-center w-full">
       {/* Toolbar */}
@@ -203,12 +295,28 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
           <ListOrdered className="w-5 h-5" />
         </button>
         <div className="w-px h-6 bg-gray-300 self-center mx-1"></div>
+        
         <button onClick={() => exec('undo')} className="p-2 rounded hover:bg-gray-100 text-gray-700" title="Undo">
           <Undo className="w-5 h-5" />
         </button>
         <button onClick={() => exec('redo')} className="p-2 rounded hover:bg-gray-100 text-gray-700" title="Redo">
           <Redo className="w-5 h-5" />
         </button>
+        <div className="w-px h-6 bg-gray-300 self-center mx-1"></div>
+        
+        {/* Table tools */}
+        <div className="flex items-center text-xs font-medium text-gray-500 bg-gray-50 rounded border border-gray-200 overflow-hidden">
+          <button onClick={() => handleTableAction('addCol')} className="p-1.5 px-2 hover:bg-gray-200 hover:text-gray-800" title="Tambah Kolom (+Col)">+Col</button>
+          <div className="w-px h-4 bg-gray-300"></div>
+          <button onClick={() => handleTableAction('addRow')} className="p-1.5 px-2 hover:bg-gray-200 hover:text-gray-800" title="Tambah Baris (+Row)">+Row</button>
+          <div className="w-px h-4 bg-gray-300"></div>
+          <button onClick={() => handleTableAction('delCol')} className="p-1.5 px-2 hover:bg-red-100 text-red-600" title="Hapus Kolom">-Col</button>
+          <div className="w-px h-4 bg-gray-300"></div>
+          <button onClick={() => handleTableAction('delRow')} className="p-1.5 px-2 hover:bg-red-100 text-red-600" title="Hapus Baris">-Row</button>
+          <div className="w-px h-4 bg-gray-300"></div>
+          <button onClick={() => handleTableAction('delTable')} className="p-1.5 px-2 hover:bg-red-100 text-red-600" title="Hapus Tabel">Del Table</button>
+        </div>
+
         <div className="w-px h-6 bg-gray-300 self-center mx-1"></div>
         <button onClick={handleInsertPageBreak} className="flex items-center gap-2 p-2 px-3 rounded hover:bg-orange-100 text-orange-700 font-medium" title="Batas Halaman (Page Break)">
           <Scissors className="w-5 h-5" />
