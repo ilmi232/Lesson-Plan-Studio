@@ -118,9 +118,8 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
           if (nearRight && nearBottom) {
             target.style.cursor = 'nwse-resize';
             currentCell = target;
-            resizeMode = 'both'; // Actually, let's just make it col-resize for simplicity or handle both? Let's just handle them separately. Wait, we can't do both simultaneously easily. Let's just default to row-resize in the corner since columns are easier to hit.
+            resizeMode = 'row'; // Fallback to row resize for corner
             target.style.cursor = 'row-resize';
-            resizeMode = 'row';
           } else if (nearRight) {
             target.style.cursor = 'col-resize';
             currentCell = target;
