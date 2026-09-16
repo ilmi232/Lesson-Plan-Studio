@@ -40,9 +40,12 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
 
     // --- TABLE RESIZER PLUGIN ---
     if (!(doc as any)._hasTableResizer) {
-      let isResizing = false;
+      let isResizingCol = false;
+      let isResizingRow = false;
       let currentCell: HTMLElement | null = null;
+      let resizeMode: 'col' | 'row' | null = null;
       let startX = 0;
+      let startY = 0;
 
       const getCols = (table: HTMLTableElement) => {
         let colgroup = table.querySelector('colgroup');
@@ -82,10 +85,9 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
       };
 
       doc.addEventListener('mousemove', (e) => {
-        if (isResizing && (doc as any)._resizeCols) {
+        if (isResizingCol && (doc as any)._resizeCols) {
           const dx = e.clientX - startX;
           const state = (doc as any)._resizeCols;
-          
           if (state.leftCol) {
             state.leftCol.style.width = `${Math.max(20, state.startWidth + dx)}px`;
           }
@@ -94,77 +96,120 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
           }
           return;
         }
+        
+        if (isResizingRow && (doc as any)._resizeRow) {
+          const dy = e.clientY - startY;
+          const state = (doc as any)._resizeRow;
+          const newHeight = Math.max(20, state.startHeight + dy);
+          state.row.style.height = `${newHeight}px`;
+          if (state.cell) {
+             state.cell.style.height = `${newHeight}px`;
+          }
+          return;
+        }
 
         const target = e.target as HTMLElement;
         if (target && (target.tagName === 'TD' || target.tagName === 'TH')) {
           const rect = target.getBoundingClientRect();
-          if (e.clientX > rect.right - 10 && e.clientX <= rect.right) {
+          const nearRight = e.clientX > rect.right - 10 && e.clientX <= rect.right;
+          const nearBottom = e.clientY > rect.bottom - 10 && e.clientY <= rect.bottom;
+          const nearLeft = e.clientX < rect.left + 10 && e.clientX >= rect.left;
+          
+          if (nearRight && nearBottom) {
+            target.style.cursor = 'nwse-resize';
+            currentCell = target;
+            resizeMode = 'both'; // Actually, let's just make it col-resize for simplicity or handle both? Let's just handle them separately. Wait, we can't do both simultaneously easily. Let's just default to row-resize in the corner since columns are easier to hit.
+            target.style.cursor = 'row-resize';
+            resizeMode = 'row';
+          } else if (nearRight) {
             target.style.cursor = 'col-resize';
             currentCell = target;
-          } else if (e.clientX < rect.left + 10 && e.clientX >= rect.left) {
+            resizeMode = 'col';
+          } else if (nearBottom) {
+            target.style.cursor = 'row-resize';
+            currentCell = target;
+            resizeMode = 'row';
+          } else if (nearLeft) {
             const prev = target.previousElementSibling as HTMLElement;
             if (prev) {
               target.style.cursor = 'col-resize';
               currentCell = prev;
+              resizeMode = 'col';
             } else {
               target.style.cursor = 'text';
               currentCell = null;
+              resizeMode = null;
             }
           } else {
             target.style.cursor = 'text';
             currentCell = null;
+            resizeMode = null;
           }
-        } else if (currentCell && !isResizing) {
+        } else if (currentCell && !isResizingCol && !isResizingRow) {
           currentCell.style.cursor = 'text';
           currentCell = null;
+          resizeMode = null;
         }
       });
 
       doc.addEventListener('mousedown', (e) => {
-        if (currentCell) {
+        if (currentCell && resizeMode) {
           const table = currentCell.closest('table');
           if (!table) return;
           
-          const cols = getCols(table);
-          
-          let colIndex = 0;
-          const row = currentCell.parentElement as HTMLTableRowElement;
-          for (let i = 0; i < row.cells.length; i++) {
-             if (row.cells[i] === currentCell) break;
-             colIndex += row.cells[i].colSpan || 1;
-          }
-          
-          const currentCellSpan = (currentCell as HTMLTableCellElement).colSpan || 1;
-          const leftColIdx = colIndex + currentCellSpan - 1;
-          const rightColIdx = leftColIdx + 1;
-          
-          const leftCol = cols[leftColIdx] as HTMLElement;
-          const rightCol = cols[rightColIdx] as HTMLElement;
-          
-          if (leftCol) {
-            isResizing = true;
-            startX = e.clientX;
+          if (resizeMode === 'col') {
+            const cols = getCols(table);
+            let colIndex = 0;
+            const row = currentCell.parentElement as HTMLTableRowElement;
+            for (let i = 0; i < row.cells.length; i++) {
+               if (row.cells[i] === currentCell) break;
+               colIndex += row.cells[i].colSpan || 1;
+            }
             
-            const getWidth = (col: HTMLElement) => parseInt(col.style.width || doc.defaultView?.getComputedStyle(col).width || '0', 10);
+            const currentCellSpan = (currentCell as HTMLTableCellElement).colSpan || 1;
+            const leftColIdx = colIndex + currentCellSpan - 1;
+            const rightColIdx = leftColIdx + 1;
             
-            (doc as any)._resizeCols = {
-               leftCol,
-               rightCol,
-               startWidth: getWidth(leftCol),
-               startNextWidth: rightCol ? getWidth(rightCol) : 0
+            const leftCol = cols[leftColIdx] as HTMLElement;
+            const rightCol = cols[rightColIdx] as HTMLElement;
+            
+            if (leftCol) {
+              isResizingCol = true;
+              startX = e.clientX;
+              const getWidth = (col: HTMLElement) => parseInt(col.style.width || doc.defaultView?.getComputedStyle(col).width || '0', 10);
+              (doc as any)._resizeCols = {
+                 leftCol,
+                 rightCol,
+                 startWidth: getWidth(leftCol),
+                 startNextWidth: rightCol ? getWidth(rightCol) : 0
+              };
+              table.style.tableLayout = 'fixed';
+              e.preventDefault();
+            }
+          } else if (resizeMode === 'row') {
+            isResizingRow = true;
+            startY = e.clientY;
+            const row = currentCell.parentElement as HTMLTableRowElement;
+            const getHeight = (el: HTMLElement) => parseInt(el.style.height || doc.defaultView?.getComputedStyle(el).height || '0', 10);
+            
+            (doc as any)._resizeRow = {
+               row,
+               cell: currentCell,
+               startHeight: getHeight(row) || getHeight(currentCell)
             };
-            
-            table.style.tableLayout = 'fixed';
             e.preventDefault();
           }
         }
       });
 
       doc.addEventListener('mouseup', () => {
-        if (isResizing) {
-          isResizing = false;
+        if (isResizingCol || isResizingRow) {
+          isResizingCol = false;
+          isResizingRow = false;
           currentCell = null;
+          resizeMode = null;
           (doc as any)._resizeCols = null;
+          (doc as any)._resizeRow = null;
           doc.dispatchEvent(new Event('input', { bubbles: true }));
         }
       });
