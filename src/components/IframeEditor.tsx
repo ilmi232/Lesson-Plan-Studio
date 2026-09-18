@@ -38,6 +38,33 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
       doc.head?.appendChild(style);
     }
 
+    // --- MAGIC PARAGRAPHS FOR TABLES ---
+    // Ensure every table has a paragraph before and after it so users can place their cursor.
+    if (!(doc as any)._hasMagicParagraphs) {
+      const tables = doc.querySelectorAll('table');
+      tables.forEach(table => {
+         // Insert after
+         const next = table.nextElementSibling;
+         if (!next || (next.tagName !== 'P' && next.tagName !== 'DIV')) {
+            const p = doc.createElement('p');
+            p.innerHTML = '<br>';
+            if (next) {
+                table.parentNode?.insertBefore(p, next);
+            } else {
+                table.parentNode?.appendChild(p);
+            }
+         }
+         // Insert before if it's the very first element in the container
+         const prev = table.previousElementSibling;
+         if (!prev) {
+            const p = doc.createElement('p');
+            p.innerHTML = '<br>';
+            table.parentNode?.insertBefore(p, table);
+         }
+      });
+      (doc as any)._hasMagicParagraphs = true;
+    }
+
     // --- TABLE RESIZER PLUGIN ---
     if (!(doc as any)._hasTableResizer) {
       let isResizingCol = false;
@@ -364,6 +391,24 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
   };
 
   const handleInsertPageBreak = () => {
+    const cell = getSelectedCell();
+    if (cell) {
+      const table = cell.closest('table');
+      if (table) {
+        const div = iframeRef.current?.contentDocument?.createElement('div');
+        if (div) {
+           div.innerHTML = '<div class="page-break"></div><p><br></p>';
+           table.parentNode?.insertBefore(div, table.nextSibling);
+           // Unwrap
+           while (div.firstChild) {
+              table.parentNode?.insertBefore(div.firstChild, div);
+           }
+           table.parentNode?.removeChild(div);
+           iframeRef.current?.contentDocument?.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        return;
+      }
+    }
     const html = '<div class="page-break"></div><p><br></p>';
     exec('insertHTML', html);
   };
