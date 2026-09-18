@@ -14,7 +14,36 @@ const PAGE_BREAK_CSS = `
   html { overflow-x: hidden; }
   body { overflow-x: hidden; }
   ::-webkit-scrollbar { display: none; }
+
+  /* Fix common AI-generated HTML layout issues inside editor */
+  .no-print { display: none !important; }
+
+  /* Neutralize fixed/absolute positioning that causes text overlap in iframe */
+  body > div[style*="position: fixed"],
+  body > div[style*="position:fixed"],
+  body > header[style*="position: fixed"],
+  body > header[style*="position:fixed"],
+  [class*="sticky"], [class*="fixed"] { 
+    position: relative !important; 
+    top: auto !important; 
+    left: auto !important; 
+    right: auto !important; 
+    bottom: auto !important; 
+    z-index: auto !important;
+  }
+
+  /* Prevent page-simulation containers from clipping content */
+  [class*="page"], [class*="sheet"], [class*="a4"], [class*="paper"] {
+    height: auto !important;
+    min-height: auto !important;
+    overflow: visible !important;
+    page-break-inside: auto !important;
+    break-inside: auto !important;
+  }
+
+  /* Spacing between tables */
   table { margin-bottom: 12px; }
+
   .page-break {
     display: block !important;
     height: 24px !important;
@@ -30,9 +59,10 @@ const PAGE_BREAK_CSS = `
     page-break-after: always !important;
     user-select: none !important;
     pointer-events: none !important;
+    position: static !important;
   }
   .page-break::before {
-    content: "BATAS HALAMAN - teks setelah ini pindah ke halaman baru saat Print/PDF";
+    content: "✂ BATAS HALAMAN — teks setelah ini pindah ke halaman baru saat Print/PDF";
   }
   @media print {
     .page-break {
@@ -259,7 +289,17 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     if (!doc) return;
     if (doc.body && doc.body.innerHTML.trim().length > 0) return;
 
+    // Strip .no-print elements (AI-generated print buttons/bars) before rendering
+    const stripNoPrint = (html: string): string => {
+      const parser = new DOMParser();
+      const parsed = parser.parseFromString(html, 'text/html');
+      parsed.querySelectorAll('.no-print').forEach(el => el.remove());
+      return parsed.documentElement.outerHTML;
+    };
+
     let content = plan.content || "";
+    content = stripNoPrint(content);
+
     if (!content.toLowerCase().includes("<html")) {
       content = `<!DOCTYPE html><html><head>
         <meta charset="utf-8">
@@ -349,10 +389,16 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
   const handleMagicPaste = async () => {
     try {
       const text = await navigator.clipboard.readText();
-      const cleaned = text.replace(/```html\s*/gi, "").replace(/```\s*/g, "").trim();
+      let cleaned = text.replace(/```html\s*/gi, "").replace(/```\s*/g, "").trim();
       const doc = iframeRef.current?.contentDocument;
       if (!doc) return;
       if (cleaned.toLowerCase().includes("<html")) {
+        // Strip .no-print elements (AI print bars) before writing
+        const parser = new DOMParser();
+        const parsed = parser.parseFromString(cleaned, 'text/html');
+        parsed.querySelectorAll('.no-print').forEach(el => el.remove());
+        cleaned = parsed.documentElement.outerHTML;
+
         doc.open(); doc.write(cleaned); doc.close();
         updatePlan(planId, doc.documentElement.outerHTML);
         setupIframe(doc);
