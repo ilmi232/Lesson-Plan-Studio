@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useRef, useCallback } from "react";
+import React, { useEffect, useRef, useCallback } from "react";
 import { useStore } from "../store";
 import {
   Bold, Italic, Underline as UnderlineIcon, List, ListOrdered,
@@ -10,7 +10,10 @@ interface IframeEditorProps {
 }
 
 const PAGE_BREAK_CSS = `
-  html, body { overflow: hidden !important; }
+  /* Hide scrollbars without breaking layout */
+  html { overflow-x: hidden; }
+  body { overflow-x: hidden; }
+  ::-webkit-scrollbar { display: none; }
   table { margin-bottom: 12px; }
   .page-break {
     display: block !important;
@@ -42,7 +45,7 @@ const PAGE_BREAK_CSS = `
 
 async function callGemini(apiKey: string, prompt: string): Promise<string> {
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-latest:generateContent?key=${apiKey}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
