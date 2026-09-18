@@ -219,9 +219,16 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
 
     const adjustHeight = () => {
       if (iframeRef.current && doc.body) {
+        const scrollContainer = document.getElementById('editor-scroll-container');
+        const currentScroll = scrollContainer ? scrollContainer.scrollTop : 0;
+        
         iframeRef.current.style.height = '10px'; // Reset to force shrink if needed
         const newHeight = Math.max(doc.body.scrollHeight, doc.documentElement.scrollHeight);
         iframeRef.current.style.height = `${newHeight + 50}px`; // Add padding bottom
+        
+        if (scrollContainer && currentScroll > 0) {
+          scrollContainer.scrollTop = currentScroll;
+        }
       }
     };
 
@@ -457,8 +464,7 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
         </button>
       </div>
 
-      {/* Editor Area */}
-      <div className="w-full bg-[#e5e7eb] overflow-y-auto pb-20 pt-4 flex-1">
+      <div id="editor-scroll-container" className="w-full bg-[#e5e7eb] overflow-y-auto pb-20 pt-4 flex-1">
           <div className="mx-auto bg-white shadow-lg flex flex-col" style={{ ...paperStyle, padding: 0 }} id="print-content">
              <iframe 
                ref={iframeRef} 
