@@ -1,12 +1,16 @@
 import React, { useEffect, useRef, useCallback, useState } from "react";
 import { useStore } from "../store";
-import { sanitizeTree, sanitizeFragment, EDITOR_CSP } from "../sanitize";
+import { sanitizeFragment } from "../sanitize";
 import { stripPrintChrome, stripRenderedChrome } from "../cleanup";
+import { serializeDoc, prepareForEditor, writeToIframe, onceParsed } from "../editorDocument";
+import { callGemini, getGeminiKey, describeGeminiError } from "../gemini";
+import { restructureDocument, type RestructureResult } from "../restructure";
+import { RestructurePreview } from "./RestructurePreview";
 import { buildGrid, freezeColumnWidths, insertColumnAfter, insertRowAfter, deleteColumns, deleteRows } from "../tableOps";
 import { CopyPromptButton } from "./CopyPromptButton";
 import {
   Bold, Italic, Underline as UnderlineIcon, List, ListOrdered,
-  Undo, Redo, Wand2, Scissors, Sparkles
+  Undo, Redo, Wand2, Scissors, Sparkles, FileCheck2, RotateCcw
 } from "lucide-react";
 
 interface IframeEditorProps {
@@ -76,125 +80,6 @@ const PAGE_BREAK_CSS = `
     .page-break::before { content: ""; }
   }
 `;
-
-// Editor-only CSS (#agy-style) and resize cursors must never reach the stored document:
-// otherwise exports carry editor visuals and old documents never pick up CSS fixes.
-function serializeDoc(doc: Document): string {
-  const root = doc.documentElement.cloneNode(true) as HTMLElement;
-  root.querySelectorAll("#agy-style, #agy-csp").forEach((el) => el.remove());
-  root.querySelectorAll<HTMLElement>("td, th").forEach((cell) => {
-    if (!cell.style.cursor) return;
-    cell.style.cursor = "";
-    if (!cell.getAttribute("style")) cell.removeAttribute("style");
-  });
-  return root.outerHTML;
-}
-
-const DEFAULT_TEMPLATE = (body: string) => `<html><head>
-  <meta charset="utf-8">
-  <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
-  <style>body { font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif; padding: 20px; line-height: 1.5; } table { border-collapse: collapse; width: 100%; } table, th, td { border: 1px solid #ccc; padding: 8px; }</style>
-  </head><body>${body}</body></html>`;
-
-// Turn stored/pasted HTML into a safe full document for the iframe: wrap fragments in the
-// default template, strip AI print toolbars (before sanitizing, which removes their onclick)
-// and editor-only elements saved by older versions, sanitize, and put the CSP first in <head>
-// so it covers everything after it.
-function prepareForEditor(html: string): string {
-  const source = html.toLowerCase().includes("<html") ? html : DEFAULT_TEMPLATE(html);
-  const parsed = new DOMParser().parseFromString(source, "text/html");
-  stripPrintChrome(parsed.body);
-  sanitizeTree(parsed);
-  parsed.querySelectorAll("#agy-style, #agy-csp").forEach((el) => el.remove());
-  const csp = parsed.createElement("meta");
-  csp.id = "agy-csp";
-  csp.httpEquiv = "Content-Security-Policy";
-  csp.content = EDITOR_CSP;
-  parsed.head.prepend(csp);
-  return parsed.documentElement.outerHTML;
-}
-
-function writeToIframe(iframe: HTMLIFrameElement, html: string) {
-  const doc = iframe.contentDocument!;
-  doc.open();
-  // MathJax reads its config from window.MathJax. Set it from here, because inline
-  // <script> config is stripped by the sanitizer and blocked by the CSP.
-  (iframe.contentWindow as any).MathJax = { tex: { inlineMath: [["$", "$"], ["\\(", "\\)"]] } };
-  doc.write(html);
-  doc.close();
-}
-
-// A blocking <script src> in <head> (e.g. the Tailwind CDN) pauses the parser, so right
-// after doc.close() the document may not have a <body> yet.
-function onceParsed(doc: Document, fn: () => void) {
-  if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", fn, { once: true });
-  else fn();
-}
-
-// "-latest" alias is updated by Google on each Flash release, so the app doesn't break
-// when a pinned model version is shut down (as happened with gemini-2.0-flash).
-// Flash-Lite is the fallback when Flash is overloaded: separate capacity and quota.
-const GEMINI_MODELS = ["gemini-flash-latest", "gemini-3.5-flash-lite"];
-// Wait before each retry on the same model (overload spikes are usually short)
-const GEMINI_RETRY_DELAYS_MS = [2000, 5000];
-
-class GeminiKeyError extends Error {}
-class GeminiBusyError extends Error {}   // 429/500/503/504: retry, then try the next model
-class GeminiModelError extends Error {}  // 404: model gone, skip to the next model
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function callGemini(apiKey: string, prompt: string, onRetry?: (attempt: number) => void): Promise<string> {
-  let lastError: Error = new Error("Gemini tidak merespons.");
-  let attempt = 0;
-  for (const model of GEMINI_MODELS) {
-    for (let i = 0; i <= GEMINI_RETRY_DELAYS_MS.length; i++) {
-      if (attempt > 0) onRetry?.(attempt);
-      attempt++;
-      try {
-        return await requestGemini(model, apiKey, prompt);
-      } catch (err) {
-        if (!(err instanceof GeminiBusyError || err instanceof GeminiModelError)) throw err;
-        // Keep the overload error for the user; a 404 on the fallback would only confuse
-        if (err instanceof GeminiBusyError || !(lastError instanceof GeminiBusyError)) lastError = err;
-        if (err instanceof GeminiModelError || i === GEMINI_RETRY_DELAYS_MS.length) break;
-        await sleep(GEMINI_RETRY_DELAYS_MS[i]);
-      }
-    }
-  }
-  throw lastError;
-}
-
-async function requestGemini(model: string, apiKey: string, prompt: string): Promise<string> {
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-    {
-      method: "POST",
-      // Key goes in a header, not the URL, so it doesn't end up in logs or history
-      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.2 },
-      }),
-    }
-  );
-  if (!response.ok) {
-    const err = await response.json().catch(() => null);
-    const message: string = err?.error?.message || `HTTP ${response.status}`;
-    // An invalid key comes back as 400 with reason API_KEY_INVALID in details (not in the message);
-    // revoked/leaked/restricted keys come back as 401/403.
-    const invalidKey =
-      response.status === 401 || response.status === 403 ||
-      (err?.error?.details ?? []).some((d: { reason?: string }) => d?.reason === "API_KEY_INVALID");
-    if (invalidKey) throw new GeminiKeyError(message);
-    if ([429, 500, 503, 504].includes(response.status)) throw new GeminiBusyError(message);
-    if (response.status === 404) throw new GeminiModelError(message);
-    throw new Error(message);
-  }
-  const data = await response.json();
-  const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-  return text.replace(/^```html\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/g, "").trim();
-}
 
 function attachTableResizer(doc: Document) {
   let isResizingCol = false;
@@ -295,9 +180,11 @@ function attachTableResizer(doc: Document) {
 }
 
 export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
-  const { plans, updatePlan, paperSize } = useStore();
+  const { plans, updatePlan, replaceContent, restorePreviousVersion, paperSize } = useStore();
   const plan = plans.find((p) => p.id === planId);
-  const [aiStatus, setAiStatus] = useState<string | null>(null);
+  // One AI task at a time; the label shows progress on the button that started it
+  const [aiTask, setAiTask] = useState<{ kind: "table" | "doc"; label: string } | null>(null);
+  const [preview, setPreview] = useState<{ before: string; after: string; result: RestructureResult } | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   const adjustHeight = useCallback((forceReset = false) => {
@@ -448,6 +335,29 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     exec("insertHTML", '<div class="page-break"></div><p><br></p>');
   };
 
+  // Replace the whole document in the editor. With a reason, the current content is kept as
+  // the plan's previous version so the teacher can undo from the toolbar.
+  const loadIntoEditor = (html: string, reason?: string) => {
+    const iframe = iframeRef.current;
+    const doc = iframe?.contentDocument;
+    if (!iframe || !doc) return;
+    writeToIframe(iframe, prepareForEditor(html));
+    // doc.open() erases every event listener, so the table resizer must be re-attached
+    (doc as any)._tableResizerAttached = false;
+    onceParsed(doc, () => {
+      // Store before setupIframe: its print-toolbar cleanup may save again right away
+      if (reason) replaceContent(planId, serializeDoc(doc), reason);
+      setupIframe(doc);
+    });
+  };
+
+  const handleRestoreVersion = () => {
+    const reason = plan?.previousVersion?.reason;
+    if (!window.confirm(`Kembalikan dokumen ke versi sebelum "${reason}"?\nPerubahan sejak itu akan hilang.`)) return;
+    const previous = restorePreviousVersion(planId);
+    if (previous !== null) loadIntoEditor(previous);
+  };
+
   const handleMagicPaste = async () => {
     try {
       const text = await navigator.clipboard.readText();
@@ -456,13 +366,7 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
       const doc = iframe?.contentDocument;
       if (!iframe || !doc) return;
       if (cleaned.toLowerCase().includes("<html")) {
-        writeToIframe(iframe, prepareForEditor(cleaned));
-        // doc.open() erases every event listener, so the table resizer must be re-attached
-        (doc as any)._tableResizerAttached = false;
-        onceParsed(doc, () => {
-          setupIframe(doc);
-          updatePlan(planId, serializeDoc(doc));
-        });
+        loadIntoEditor(cleaned, "Magic Paste");
       } else {
         const fragment = new DOMParser().parseFromString(cleaned, "text/html");
         stripPrintChrome(fragment.body);
@@ -476,22 +380,17 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
   const handleAiFixTable = async () => {
     const doc = iframeRef.current?.contentDocument;
     if (!doc) return;
-    let apiKey = localStorage.getItem("gemini_api_key") || "";
-    if (!apiKey) {
-      apiKey = prompt(
-        "Masukkan Gemini API Key Anda:\n(Dapatkan gratis di https://aistudio.google.com/apikey)\n\nKey ini disimpan hanya di browser Anda, tidak dikirim ke server manapun selain Google."
-      ) || "";
-      if (!apiKey) return;
-      localStorage.setItem("gemini_api_key", apiKey.trim());
-    }
     const cell = getSelectedCell();
     const targetTable: HTMLTableElement | null = cell
       ? (cell.closest("table") as HTMLTableElement)
       : (doc.querySelector("table") as HTMLTableElement | null);
     if (!targetTable) {
-      alert("Tidak ada tabel yang ditemukan. Klik di dalam tabel terlebih dahulu."); return;
+      alert("Tidak ada tabel yang ditemukan. Klik di dalam tabel terlebih dahulu.\n\nKalau tabelnya dibuat dari kotak-kotak <div> (bukan tabel asli), pakai \"Rapikan Dokumen (AI)\".");
+      return;
     }
-    setAiStatus("Memproses...");
+    const apiKey = getGeminiKey();
+    if (!apiKey) return;
+    setAiTask({ kind: "table", label: "Memproses..." });
     try {
       const prompt = `Kamu adalah asisten perapih tabel HTML untuk RPP (Rencana Pelaksanaan Pembelajaran).
 Perbaiki tabel HTML di bawah ini agar:
@@ -502,7 +401,9 @@ Perbaiki tabel HTML di bawah ini agar:
 5. Kembalikan HANYA kode HTML tabel saja (mulai <table> hingga </table>), tanpa penjelasan.
 
 ${targetTable.outerHTML}`;
-      const fixedHtml = await callGemini(apiKey.trim(), prompt, (n) => setAiStatus(`Server sibuk, mencoba lagi (${n})...`));
+      const fixedHtml = await callGemini(apiKey, prompt, {
+        onRetry: (n) => setAiTask({ kind: "table", label: `Server sibuk, mencoba lagi (${n})...` }),
+      });
       if (!fixedHtml.toLowerCase().includes("<table")) throw new Error("AI tidak mengembalikan tabel HTML yang valid.");
       const tmp = doc.createElement("div");
       tmp.innerHTML = sanitizeFragment(fixedHtml);
@@ -512,18 +413,42 @@ ${targetTable.outerHTML}`;
         doc.dispatchEvent(new Event("input", { bubbles: true }));
         adjustHeight();
       }
-    } catch (err: any) {
-      if (err instanceof GeminiKeyError) {
-        localStorage.removeItem("gemini_api_key");
-        alert(`API Key tidak valid atau sudah dicabut (${err.message}).\nKey telah dihapus — klik tombol lagi untuk memasukkan key baru.`);
-      } else if (err instanceof GeminiBusyError) {
-        alert(`Server Gemini sedang sibuk atau kuota habis, dan sudah dicoba beberapa kali (termasuk model cadangan).\nTabel tidak diubah — silakan coba lagi beberapa menit lagi.\n\nDetail: ${err.message}`);
-      } else {
-        alert(`Gagal: ${err.message}`);
-      }
+    } catch (err) {
+      alert(describeGeminiError(err, "Tabel tidak diubah"));
     } finally {
-      setAiStatus(null);
+      setAiTask(null);
     }
+  };
+
+  const handleAiRestructure = async () => {
+    const doc = iframeRef.current?.contentDocument;
+    if (!doc?.body || !plan) return;
+    const apiKey = getGeminiKey();
+    if (!apiKey) return;
+    setAiTask({ kind: "doc", label: "Menyiapkan..." });
+    // Edits made while the AI works would be lost when the result is applied
+    doc.designMode = "off";
+    try {
+      const before = prepareForEditor(serializeDoc(doc));
+      const result = await restructureDocument(doc, {
+        apiKey,
+        paperSize,
+        title: plan.title,
+        onProgress: (label) => setAiTask({ kind: "doc", label }),
+      });
+      setPreview({ before, after: prepareForEditor(result.html), result });
+    } catch (err) {
+      alert(describeGeminiError(err, "Dokumen tidak diubah"));
+    } finally {
+      doc.designMode = "on";
+      setAiTask(null);
+    }
+  };
+
+  const handleApplyRestructure = () => {
+    if (!preview) return;
+    loadIntoEditor(preview.result.html, "Rapikan Dokumen (AI)");
+    setPreview(null);
   };
 
   if (!plan) return null;
@@ -557,9 +482,17 @@ ${targetTable.outerHTML}`;
           <Scissors className="w-4 h-4" /><span>Batas Halaman</span>
         </button>
         <div className="w-px h-6 bg-gray-300 self-center mx-0.5" />
-        <button id="ai-fix-btn" onClick={handleAiFixTable} disabled={aiStatus !== null} className="flex items-center gap-1.5 p-2 px-3 rounded hover:bg-emerald-100 text-emerald-700 font-medium text-sm border border-emerald-200 disabled:opacity-60 disabled:cursor-wait" title="Rapikan tabel menggunakan AI Gemini">
-          <Sparkles className="w-4 h-4" /><span>{aiStatus ?? "Rapikan Tabel (AI)"}</span>
+        <button onClick={handleAiRestructure} disabled={aiTask !== null} className="flex items-center gap-1.5 p-2 px-3 rounded text-white bg-emerald-600 hover:bg-emerald-700 font-medium text-sm disabled:opacity-60 disabled:cursor-wait" title="Rapikan format seluruh dokumen dengan AI Gemini (tabel asli, tanpa Tailwind, siap cetak). Isi teks diperiksa otomatis dan ada pratinjau sebelum diterapkan.">
+          <FileCheck2 className="w-4 h-4" /><span>{aiTask?.kind === "doc" ? aiTask.label : "Rapikan Dokumen (AI)"}</span>
         </button>
+        <button id="ai-fix-btn" onClick={handleAiFixTable} disabled={aiTask !== null} className="flex items-center gap-1.5 p-2 px-3 rounded hover:bg-emerald-100 text-emerald-700 font-medium text-sm border border-emerald-200 disabled:opacity-60 disabled:cursor-wait" title="Rapikan satu tabel (yang sedang diklik) dengan AI Gemini">
+          <Sparkles className="w-4 h-4" /><span>{aiTask?.kind === "table" ? aiTask.label : "Rapikan Tabel (AI)"}</span>
+        </button>
+        {plan.previousVersion && (
+          <button onClick={handleRestoreVersion} disabled={aiTask !== null} className="flex items-center gap-1.5 p-2 px-3 rounded hover:bg-amber-100 text-amber-700 font-medium text-sm border border-amber-200" title={`Kembalikan versi sebelum ${plan.previousVersion.reason}`}>
+            <RotateCcw className="w-4 h-4" /><span>Kembalikan</span>
+          </button>
+        )}
         <div className="w-px h-6 bg-gray-300 self-center mx-0.5" />
         <button onClick={handleMagicPaste} className="flex items-center gap-1.5 p-2 px-3 rounded hover:bg-purple-100 text-purple-700 font-medium text-sm" title="Paste HTML dari clipboard">
           <Wand2 className="w-4 h-4" /><span>Magic Paste</span>
@@ -572,6 +505,15 @@ ${targetTable.outerHTML}`;
           <iframe ref={iframeRef} style={{ width: "100%", flex: "1 1 auto", border: "none", display: "block", minHeight: paperStyle.minHeight }} title="Editor" />
         </div>
       </div>
+      {preview && (
+        <RestructurePreview
+          beforeHtml={preview.before}
+          afterHtml={preview.after}
+          result={preview.result}
+          onApply={handleApplyRestructure}
+          onCancel={() => setPreview(null)}
+        />
+      )}
     </div>
   );
 };

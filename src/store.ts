@@ -12,6 +12,8 @@ export interface LessonPlan {
   content: string; // HTML content
   createdAt: number;
   updatedAt: number;
+  // Content before the last whole-document replacement (AI restructure, Magic Paste), for undo
+  previousVersion?: { content: string; savedAt: number; reason: string };
 }
 
 // Save status lives in its own store: updating it from inside the persist
@@ -65,6 +67,8 @@ interface AppState {
   setCurrentPlanId: (id: string | null) => void;
   createPlan: (title: string, content?: string) => string;
   updatePlan: (id: string, content: string, title?: string) => void;
+  replaceContent: (id: string, content: string, reason: string) => void;
+  restorePreviousVersion: (id: string) => string | null;
   deletePlan: (id: string) => void;
   duplicatePlan: (id: string) => string;
 }
@@ -119,6 +123,28 @@ export const useStore = create<AppState>()(
         return id;
       },
 
+      replaceContent: (id, content, reason) => {
+        set((state) => ({
+          plans: state.plans.map((plan) =>
+            plan.id === id
+              ? { ...plan, content, updatedAt: Date.now(), previousVersion: { content: plan.content, savedAt: Date.now(), reason } }
+              : plan
+          ),
+        }));
+      },
+
+      // Returns the restored content (null if there was no previous version)
+      restorePreviousVersion: (id) => {
+        const previous = get().plans.find((p) => p.id === id)?.previousVersion;
+        if (!previous) return null;
+        set((state) => ({
+          plans: state.plans.map((plan) =>
+            plan.id === id ? { ...plan, content: previous.content, updatedAt: Date.now(), previousVersion: undefined } : plan
+          ),
+        }));
+        return previous.content;
+      },
+
       updatePlan: (id, content, title) => {
         set((state) => ({
           plans: state.plans.map((plan) =>
@@ -144,6 +170,7 @@ export const useStore = create<AppState>()(
         const newId = uuidv4();
         const newPlan: LessonPlan = {
           ...planToCopy,
+          previousVersion: undefined,
           id: newId,
           title: `${planToCopy.title} (Copy)`,
           createdAt: Date.now(),
