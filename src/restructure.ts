@@ -134,6 +134,52 @@ function answerToFragment(answer: string): string {
   return sanitizeFragment(parsed.body.innerHTML);
 }
 
+const tokens = (text: string) => text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+
+// First words of an element, text nodes joined with spaces like wordsOf()
+// (textContent would glue "Review<br>Grade" into one word)
+function leadingTokens(el: Element, count: number): string[] {
+  const walker = el.ownerDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const out: string[] = [];
+  while (out.length < count && walker.nextNode()) out.push(...tokens(walker.currentNode.nodeValue ?? ""));
+  return out.slice(0, count);
+}
+const BLOCKS = "p, div, h1, h2, h3, h4, h5, h6, table, ul, ol, li, section, article, blockquote, pre";
+
+// Gemini sometimes drops a page-break marker while keeping every word (seen on real worksheets).
+// Put each marker back in front of the block that starts with the words that followed it in
+// the source. Returns null if a marker's position can't be found.
+function restoreMissingMarkers(source: string, answer: string): string | null {
+  const src = new DOMParser().parseFromString(source, "text/html");
+  const out = new DOMParser().parseFromString(answer, "text/html");
+  const markers = Array.from(src.body.querySelectorAll("p")).filter((p) => p.textContent?.includes(PAGE_BREAK_MARKER));
+  const present = (out.body.textContent?.split(PAGE_BREAK_MARKER).length ?? 1) - 1;
+  if (present >= markers.length) return null;
+  for (const marker of markers) {
+    // Words right after the marker in the source
+    const walker = src.createTreeWalker(src.body, NodeFilter.SHOW_TEXT);
+    walker.currentNode = marker;
+    const following: string[] = [];
+    while (following.length < 6 && walker.nextNode()) {
+      if (!marker.contains(walker.currentNode)) following.push(...tokens(walker.currentNode.nodeValue ?? ""));
+    }
+    const anchor = following.slice(0, 6);
+    const p = out.createElement("p");
+    p.textContent = `[[${PAGE_BREAK_MARKER}]]`;
+    if (anchor.length === 0) { out.body.appendChild(p); continue; }
+    // Outermost block whose text starts with those words (document order visits ancestors first)
+    const target = Array.from(out.body.querySelectorAll(BLOCKS)).find((el) => {
+      const t = leadingTokens(el, anchor.length);
+      return anchor.every((w, i) => t[i] === w);
+    });
+    if (!target) return null;
+    // Skip if the AI kept this marker right before the target
+    if (target.previousElementSibling?.textContent?.includes(PAGE_BREAK_MARKER)) continue;
+    target.before(p);
+  }
+  return out.body.innerHTML;
+}
+
 // Words are checked with the markers still in place; convert them only for the final document
 function finalizePart(html: string): string {
   const parsed = new DOMParser().parseFromString(html, "text/html");
@@ -160,8 +206,17 @@ async function restructurePart(source: string, index: number, total: number, opt
       }
       throw err; // key/overload/network problems affect every part: abort the whole run
     }
-    const html = answerToFragment(answer);
+    let html = answerToFragment(answer);
     diff = compareWords(before, wordsOf(html));
+    const onlyMarkersMissing = diff.extra.length === 0 && diff.missing.length > 0 &&
+      diff.missing.every((w) => w === PAGE_BREAK_MARKER.toLowerCase());
+    if (onlyMarkersMissing) {
+      const repaired = restoreMissingMarkers(source, html);
+      if (repaired !== null) {
+        html = repaired;
+        diff = compareWords(before, wordsOf(html));
+      }
+    }
     if (diff.ok) return { html, result: { status: "restructured" } };
     note = `Percobaan sebelumnya MENGUBAH ISI teks dan ditolak.` +
       (diff.missing.length ? ` Kata yang hilang: ${diff.missing.slice(0, 15).join(", ")}.` : "") +

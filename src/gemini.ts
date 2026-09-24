@@ -44,10 +44,17 @@ export function describeGeminiError(err: unknown, unchanged: string): string {
   return `Gagal: ${err instanceof Error ? err.message : String(err)}\n${unchanged}.`;
 }
 
+// When the primary model is overloaded, skip it for a while: a multi-part request would
+// otherwise spend its retries on it again for every part (measured: 7.6 min for 10 parts).
+const SKIP_BUSY_MODEL_MS = 5 * 60 * 1000;
+const busyUntil = new Map<string, number>();
+
 export async function callGemini(apiKey: string, prompt: string, options: GeminiOptions = {}): Promise<string> {
   let lastError: Error = new Error("Gemini tidak merespons.");
   let attempt = 0;
-  for (const model of GEMINI_MODELS) {
+  const now = Date.now();
+  const available = GEMINI_MODELS.filter((m) => (busyUntil.get(m) ?? 0) <= now);
+  for (const model of available.length ? available : GEMINI_MODELS) {
     for (let i = 0; i <= GEMINI_RETRY_DELAYS_MS.length; i++) {
       if (attempt > 0) options.onRetry?.(attempt);
       attempt++;
@@ -57,7 +64,12 @@ export async function callGemini(apiKey: string, prompt: string, options: Gemini
         if (!(err instanceof GeminiBusyError || err instanceof GeminiModelError)) throw err;
         // Keep the overload error for the user; a 404 on the fallback would only confuse
         if (err instanceof GeminiBusyError || !(lastError instanceof GeminiBusyError)) lastError = err;
-        if (err instanceof GeminiModelError || i === GEMINI_RETRY_DELAYS_MS.length) break;
+        if (err instanceof GeminiModelError || i === GEMINI_RETRY_DELAYS_MS.length) {
+          if (err instanceof GeminiBusyError && model !== GEMINI_MODELS[GEMINI_MODELS.length - 1]) {
+            busyUntil.set(model, Date.now() + SKIP_BUSY_MODEL_MS);
+          }
+          break;
+        }
         await sleep(GEMINI_RETRY_DELAYS_MS[i]);
       }
     }
