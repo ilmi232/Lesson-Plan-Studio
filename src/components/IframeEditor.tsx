@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useCallback, useState } from "react";
 import { useStore } from "../store";
 import { sanitizeFragment } from "../sanitize";
-import { stripPrintChrome, stripRenderedChrome } from "../cleanup";
+import { stripPrintChrome, stripRenderedChrome, releaseArtificialHeights } from "../cleanup";
 import { serializeDoc, prepareForEditor, writeToIframe, onceParsed } from "../editorDocument";
 import { callGemini, getGeminiKey, describeGeminiError } from "../gemini";
 import { restructureDocument, type RestructureResult } from "../restructure";
@@ -25,6 +25,10 @@ const PAGE_BREAK_CSS = `
 
   /* Fix common AI-generated HTML layout issues inside editor */
   .no-print { display: none !important; }
+
+  /* The iframe is sized to its content, so viewport-based heights (min-h-screen, 100vh)
+     would grow with it forever */
+  html, body { height: auto !important; min-height: 0 !important; }
 
   /* Neutralize fixed/absolute positioning that causes text overlap in iframe */
   body > div[style*="position: fixed"],
@@ -187,17 +191,24 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
   const [preview, setPreview] = useState<{ before: string; after: string; result: RestructureResult } | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
-  const adjustHeight = useCallback((forceReset = false) => {
+  // Size the iframe to its content. Measured from the content itself, not scrollHeight: the
+  // document's scrollHeight is never smaller than the iframe, so it could only ever grow
+  // (every keystroke added 60px of blank space at the end).
+  const adjustHeight = useCallback(() => {
     const iframe = iframeRef.current;
-    if (!iframe) return;
-    const doc = iframe.contentDocument;
-    if (!doc || !doc.body) return;
+    const doc = iframe?.contentDocument;
+    const win = doc?.defaultView;
+    if (!iframe || !doc?.body || !win) return;
     const scrollContainer = document.getElementById("editor-scroll-container");
     const savedScroll = scrollContainer?.scrollTop ?? 0;
-    if (forceReset) iframe.style.height = "10px";
-    const newH = Math.max(doc.body.scrollHeight, doc.documentElement.scrollHeight, 300);
-    const currentH = parseInt(iframe.style.height || "0", 10);
-    if (forceReset || newH + 60 > currentH) iframe.style.height = `${newH + 60}px`;
+    const range = doc.createRange();
+    range.selectNodeContents(doc.body);
+    const bodyStyle = win.getComputedStyle(doc.body);
+    const contentBottom = range.getBoundingClientRect().bottom + win.scrollY +
+      parseFloat(bodyStyle.paddingBottom) + parseFloat(bodyStyle.marginBottom);
+    const target = Math.max(Math.ceil(contentBottom), 300) + 60;
+    const current = parseInt(iframe.style.height || "0", 10);
+    if (Math.abs(target - current) > 2) iframe.style.height = `${target}px`;
     if (scrollContainer && savedScroll > 0) scrollContainer.scrollTop = savedScroll;
   }, []);
 
@@ -233,12 +244,15 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     // Print toolbars only detectable once rendered; run again after the Tailwind CDN,
     // which generates its styles after DOMContentLoaded, has styled the page.
     const cleanRendered = () => {
-      if (stripRenderedChrome(doc) > 0) updatePlan(planId, serializeDoc(doc));
+      if (stripRenderedChrome(doc) + releaseArtificialHeights(doc) > 0) {
+        updatePlan(planId, serializeDoc(doc));
+        adjustHeight();
+      }
     };
     cleanRendered();
     const cleanTimer = setTimeout(cleanRendered, 1500);
 
-    setTimeout(() => adjustHeight(true), 150);
+    setTimeout(() => adjustHeight(), 150);
     setTimeout(() => adjustHeight(), 800);
     setTimeout(() => adjustHeight(), 2500);
 

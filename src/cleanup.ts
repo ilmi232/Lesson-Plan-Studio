@@ -71,6 +71,39 @@ function printHiddenSelectors(doc: Document): string[] {
   return selectors.filter((s) => s && !s.includes("*") && !/^(html|body)$/i.test(s));
 }
 
+const TALL_PX = 700; // ~185mm: taller than any answer box, shorter than a "paper" page
+const EMPTY_GAP_PX = 300;
+
+// Web-page heights that leave long blank areas: viewport-sized boxes (min-h-screen, 100vh,
+// which also grow with the iframe) and "paper" boxes (min-height: 297mm) that are mostly empty.
+// Also inflates printouts with blank pages, so the fix is saved with the document.
+// Returns the number of elements changed.
+export function releaseArtificialHeights(doc: Document): number {
+  const win = doc.defaultView;
+  if (!win || !doc.body) return 0;
+  let changed = 0;
+  // Deepest first, so a parent is measured after its tall children shrank
+  for (const el of Array.from(doc.body.querySelectorAll<HTMLElement>("*")).reverse()) {
+    if (el.closest("table") || el.matches("img, svg, canvas, video, iframe, math") || el.tagName.includes("-")) continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.height < TALL_PX) continue;
+    const cs = win.getComputedStyle(el);
+    const viewportSized = /\d\s*[dsl]?vh\b/.test(el.getAttribute("style") ?? "") ||
+      Math.abs(parseFloat(cs.minHeight) - win.innerHeight) < 2 ||
+      Math.abs(parseFloat(cs.height) - win.innerHeight) < 2;
+    const range = doc.createRange();
+    range.selectNodeContents(el);
+    const content = range.getBoundingClientRect();
+    const contentBottom = content.height > 0 ? content.bottom : rect.top;
+    const gap = rect.bottom - contentBottom - parseFloat(cs.paddingBottom) - parseFloat(cs.borderBottomWidth);
+    if (!viewportSized && gap < EMPTY_GAP_PX) continue;
+    el.style.setProperty("min-height", "0", "important");
+    el.style.setProperty("height", "auto", "important");
+    changed++;
+  }
+  return changed;
+}
+
 // Run inside the rendered iframe: catches what only the browser knows — the document's own
 // @media print rules with made-up class names, and computed fixed/sticky positioning.
 // Returns the number of elements changed.
