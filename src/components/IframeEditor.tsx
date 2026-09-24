@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useCallback } from "react";
+import React, { useEffect, useRef, useCallback, useState } from "react";
 import { useStore } from "../store";
 import { sanitizeDocument, sanitizeFragment, EDITOR_CSP } from "../sanitize";
+import { buildGrid, insertColumnAfter, insertRowAfter, deleteColumns, deleteRows } from "../tableOps";
 import {
   Bold, Italic, Underline as UnderlineIcon, List, ListOrdered,
   Undo, Redo, Wand2, Scissors, Sparkles
@@ -125,12 +126,19 @@ function onceParsed(doc: Document, fn: () => void) {
   else fn();
 }
 
+// "-latest" alias is updated by Google on each Flash release, so the app doesn't break
+// when a pinned model version is shut down (as happened with gemini-2.0-flash).
+const GEMINI_MODEL = "gemini-flash-latest";
+
+class GeminiKeyError extends Error {}
+
 async function callGemini(apiKey: string, prompt: string): Promise<string> {
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-latest:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      // Key goes in a header, not the URL, so it doesn't end up in logs or history
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { temperature: 0.2 },
@@ -138,8 +146,14 @@ async function callGemini(apiKey: string, prompt: string): Promise<string> {
     }
   );
   if (!response.ok) {
-    const err = await response.json();
-    throw new Error(err?.error?.message || `HTTP ${response.status}`);
+    const err = await response.json().catch(() => null);
+    const message: string = err?.error?.message || `HTTP ${response.status}`;
+    // An invalid key comes back as 400 with reason API_KEY_INVALID in details (not in the message);
+    // revoked/leaked/restricted keys come back as 401/403.
+    const invalidKey =
+      response.status === 401 || response.status === 403 ||
+      (err?.error?.details ?? []).some((d: { reason?: string }) => d?.reason === "API_KEY_INVALID");
+    throw invalidKey ? new GeminiKeyError(message) : new Error(message);
   }
   const data = await response.json();
   const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
@@ -235,12 +249,8 @@ function attachTableResizer(doc: Document) {
 
     if (resizeMode === "col") {
       const cols = getCols(table);
-      const row = currentCell.parentElement as HTMLTableRowElement;
-      let colIndex = 0;
-      for (let i = 0; i < row.cells.length; i++) {
-        if (row.cells[i] === currentCell) break;
-        colIndex += row.cells[i].colSpan || 1;
-      }
+      // Visual column from the grid, so cells spanned by a rowspan above are accounted for
+      const colIndex = buildGrid(table).pos.get(currentCell as HTMLTableCellElement)?.col ?? 0;
       const span = (currentCell as HTMLTableCellElement).colSpan || 1;
       const leftColIdx = colIndex + span - 1;
       const rightColIdx = leftColIdx + 1;
@@ -278,6 +288,7 @@ function attachTableResizer(doc: Document) {
 export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
   const { plans, updatePlan, paperSize } = useStore();
   const plan = plans.find((p) => p.id === planId);
+  const [aiBusy, setAiBusy] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   const adjustHeight = useCallback((forceReset = false) => {
@@ -381,25 +392,21 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
   const handleTableAction = (action: string) => {
     const cell = getSelectedCell();
     if (!cell) { alert("Klik di dalam tabel terlebih dahulu!"); return; }
-    const row = cell.parentNode as HTMLTableRowElement;
     const table = cell.closest("table") as HTMLTableElement;
-    const cellIndex = Array.prototype.indexOf.call(row.children, cell);
     switch (action) {
-      case "addRow": {
-        const newRow = row.cloneNode(true) as HTMLTableRowElement;
-        Array.from(newRow.cells).forEach(c => (c.innerHTML = ""));
-        row.parentNode?.insertBefore(newRow, row.nextSibling); break;
-      }
-      case "delRow": row.parentNode?.removeChild(row); break;
-      case "addCol":
-        Array.from(table.rows).forEach(r => {
-          const nc = r.cells[cellIndex]?.cloneNode(true) as HTMLTableCellElement;
-          if (!nc) return; nc.innerHTML = "";
-          r.insertBefore(nc, r.cells[cellIndex].nextSibling);
-        }); break;
+      case "addRow": insertRowAfter(table, cell); break;
+      case "addCol": insertColumnAfter(table, cell); break;
+      case "delRow":
+        if (!deleteRows(table, cell)) table.remove();
+        break;
       case "delCol":
-        Array.from(table.rows).forEach(r => { if (r.cells[cellIndex]) r.removeChild(r.cells[cellIndex]); }); break;
-      case "delTable": table.parentNode?.removeChild(table); break;
+        if (!deleteColumns(table, cell)) table.remove();
+        break;
+      case "delTable":
+        // DOM edits are not covered by the Undo button, so confirm the destructive one
+        if (!window.confirm("Hapus seluruh tabel ini? Tindakan ini tidak bisa di-undo.")) return;
+        table.remove();
+        break;
     }
     iframeRef.current?.contentDocument?.dispatchEvent(new Event("input", { bubbles: true }));
   };
@@ -464,8 +471,7 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     if (!targetTable) {
       alert("Tidak ada tabel yang ditemukan. Klik di dalam tabel terlebih dahulu."); return;
     }
-    const btn = document.getElementById("ai-fix-btn") as HTMLButtonElement | null;
-    if (btn) { btn.textContent = "Memproses..."; btn.disabled = true; }
+    setAiBusy(true);
     try {
       const prompt = `Kamu adalah asisten perapih tabel HTML untuk RPP (Rencana Pelaksanaan Pembelajaran).
 Perbaiki tabel HTML di bawah ini agar:
@@ -487,14 +493,14 @@ ${targetTable.outerHTML}`;
         adjustHeight();
       }
     } catch (err: any) {
-      if (err.message?.includes("API_KEY_INVALID") || err.message?.includes("401")) {
+      if (err instanceof GeminiKeyError) {
         localStorage.removeItem("gemini_api_key");
-        alert("API Key tidak valid atau kadaluarsa. Silakan coba lagi.");
+        alert(`API Key tidak valid atau sudah dicabut (${err.message}).\nKey telah dihapus — klik tombol lagi untuk memasukkan key baru.`);
       } else {
         alert(`Gagal: ${err.message}`);
       }
     } finally {
-      if (btn) { btn.textContent = "✨ Rapikan Tabel (AI)"; btn.disabled = false; }
+      setAiBusy(false);
     }
   };
 
@@ -529,8 +535,8 @@ ${targetTable.outerHTML}`;
           <Scissors className="w-4 h-4" /><span>Batas Halaman</span>
         </button>
         <div className="w-px h-6 bg-gray-300 self-center mx-0.5" />
-        <button id="ai-fix-btn" onClick={handleAiFixTable} className="flex items-center gap-1.5 p-2 px-3 rounded hover:bg-emerald-100 text-emerald-700 font-medium text-sm border border-emerald-200" title="Rapikan tabel menggunakan AI Gemini">
-          <Sparkles className="w-4 h-4" /><span>Rapikan Tabel (AI)</span>
+        <button id="ai-fix-btn" onClick={handleAiFixTable} disabled={aiBusy} className="flex items-center gap-1.5 p-2 px-3 rounded hover:bg-emerald-100 text-emerald-700 font-medium text-sm border border-emerald-200 disabled:opacity-60 disabled:cursor-wait" title="Rapikan tabel menggunakan AI Gemini">
+          <Sparkles className="w-4 h-4" /><span>{aiBusy ? "Memproses..." : "Rapikan Tabel (AI)"}</span>
         </button>
         <div className="w-px h-6 bg-gray-300 self-center mx-0.5" />
         <button onClick={handleMagicPaste} className="flex items-center gap-1.5 p-2 px-3 rounded hover:bg-purple-100 text-purple-700 font-medium text-sm" title="Paste HTML dari clipboard">
