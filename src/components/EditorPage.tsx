@@ -4,6 +4,7 @@ import { useStore } from '../store';
 import { IframeEditor } from './IframeEditor';
 import { ArrowLeft, Printer, FileType, Search } from 'lucide-react';
 import { printDocument } from '../pagination';
+import { buildWordHtml } from '../wordExport';
 
 export const EditorPage: React.FC = () => {
   const { currentPlanId, plans, updatePlan, setCurrentPlanId, paperSize, setPaperSize } = useStore();
@@ -27,36 +28,9 @@ export const EditorPage: React.FC = () => {
   };
 
   const handleExportDocx = () => {
-    // If the content is already a full HTML string with head/body, we can use it directly
-    let htmlString = plan.content;
-    if (!htmlString.includes('<html')) {
-       htmlString = `
-      <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
-        <head>
-          <meta charset="utf-8">
-          <title>${plan.title}</title>
-          <!--[if gte mso 9]>
-          <xml>
-            <w:WordDocument>
-              <w:View>Print</w:View>
-              <w:Zoom>100</w:Zoom>
-              <w:DoNotOptimizeForBrowser/>
-            </w:WordDocument>
-          </xml>
-          <![endif]-->
-          <style>
-            table { border-collapse: collapse; width: 100%; }
-            table, th, td { border: 1px solid black; }
-            th, td { padding: 8px; }
-          </style>
-        </head>
-        <body>
-          ${plan.content}
-        </body>
-      </html>
-    `;
-    }
-    
+    const doc = document.querySelector<HTMLIFrameElement>('#print-content iframe')?.contentDocument;
+    if (!doc?.body) return;
+    const htmlString = buildWordHtml(doc, plan.title);
     const blob = new Blob(['\ufeff', htmlString], { type: 'application/msword' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');

@@ -7,6 +7,12 @@ import { stripPrintChrome } from "./cleanup";
 export function serializeDoc(doc: Document): string {
   const root = doc.documentElement.cloneNode(true) as HTMLElement;
   root.querySelectorAll("#agy-style, #agy-csp, #agy-print").forEach((el) => el.remove());
+  // Store formulas as their source, not MathJax's rendered markup: that markup draws the
+  // characters from generated CSS, so it is empty anywhere else (Word) and bloats storage.
+  // MathJax renders the source again when the document is opened.
+  const cloneBody = root.querySelector("body");
+  if (doc.body && cloneBody) restoreMath(doc.body, cloneBody);
+  removeMathJaxStyles(root);
   root.querySelectorAll("[data-agy-keep]").forEach((el) => el.removeAttribute("data-agy-keep"));
   root.querySelectorAll<HTMLElement>("td, th").forEach((cell) => {
     if (!cell.style.cursor) return;
@@ -55,4 +61,34 @@ export function writeToIframe(iframe: HTMLIFrameElement, html: string) {
 export function onceParsed(doc: Document, fn: () => void) {
   if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", fn, { once: true });
   else fn();
+}
+
+// MathJax's generated stylesheets (rendering and its context menu); recreated on every load
+export function removeMathJaxStyles(root: ParentNode) {
+  root.querySelectorAll("style").forEach((s) => {
+    if (s.id === "MJX-CHTML-styles" || s.textContent?.trimStart().startsWith(".CtxtMenu_")) s.remove();
+  });
+}
+
+// MathJax replaces $...$ with rendered markup. Put the TeX back (for saving and for the AI);
+// formulas that were not TeX (MathML input, or rendered markup saved by an older version)
+// fall back to the MathML MathJax keeps for screen readers, which it can render again.
+export function restoreMath(liveBody: HTMLElement, clone: HTMLElement) {
+  const texByContainer = new Map<Element, string>();
+  const mathDoc = (liveBody.ownerDocument.defaultView as any)?.MathJax?.startup?.document;
+  try {
+    for (const item of mathDoc?.math ?? []) {
+      if (item?.typesetRoot && typeof item.math === "string" && item.inputJax?.name === "TeX") {
+        texByContainer.set(item.typesetRoot, item.display ? `$$${item.math}$$` : `$${item.math}$`);
+      }
+    }
+  } catch { /* MathJax not loaded or a different version */ }
+  const live = Array.from(liveBody.querySelectorAll("mjx-container"));
+  const copies = Array.from(clone.querySelectorAll("mjx-container"));
+  copies.forEach((copy, i) => {
+    const tex = live[i] && texByContainer.get(live[i]);
+    const mathml = copy.querySelector("mjx-assistive-mml math");
+    if (tex) copy.replaceWith(clone.ownerDocument.createTextNode(tex));
+    else if (mathml) copy.replaceWith(mathml);
+  });
 }

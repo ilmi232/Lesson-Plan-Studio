@@ -7,7 +7,7 @@ import { callGemini, GeminiTruncatedError } from "./gemini";
 import { buildRestructurePrompt, PAGE_BREAK_MARKER } from "./aiPrompt";
 import { stripPrintChrome } from "./cleanup";
 import { sanitizeFragment } from "./sanitize";
-import { DEFAULT_TEMPLATE } from "./editorDocument";
+import { DEFAULT_TEMPLATE, restoreMath } from "./editorDocument";
 
 // Source HTML per request. Output is usually similar in size (classes become inline styles),
 // which keeps each answer well below the output token limit.
@@ -96,27 +96,6 @@ export function compareWords(before: string[], after: string[]): WordDiff {
   return { missing, extra, ok };
 }
 
-// MathJax replaces $...$ with rendered markup. Put the TeX back so the AI sees (and keeps) the
-// formula; fall back to the MathML MathJax keeps for screen readers, which Chrome renders natively.
-export function restoreMath(liveBody: HTMLElement, clone: HTMLElement) {
-  const texByContainer = new Map<Element, string>();
-  const mathDoc = (liveBody.ownerDocument.defaultView as any)?.MathJax?.startup?.document;
-  try {
-    for (const item of mathDoc?.math ?? []) {
-      if (item?.typesetRoot && typeof item.math === "string") {
-        texByContainer.set(item.typesetRoot, item.display ? `$$${item.math}$$` : `$${item.math}$`);
-      }
-    }
-  } catch { /* MathJax not loaded or a different version */ }
-  const live = Array.from(liveBody.querySelectorAll("mjx-container"));
-  const copies = Array.from(clone.querySelectorAll("mjx-container"));
-  copies.forEach((copy, i) => {
-    const tex = live[i] && texByContainer.get(live[i]);
-    const mathml = copy.querySelector("mjx-assistive-mml math");
-    if (tex) copy.replaceWith(clone.ownerDocument.createTextNode(tex));
-    else if (mathml) copy.replaceWith(mathml);
-  });
-}
 
 // AI pages usually wrap everything in one centered "paper" container; descend into it so the
 // content can be split, dropping the web-page wrapper along the way.

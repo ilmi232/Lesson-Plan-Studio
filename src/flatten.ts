@@ -4,7 +4,7 @@
 // resizer, and the page renders offline.
 
 import { freezeColumnWidths } from "./tableOps";
-import { restoreMath } from "./restructure";
+import { restoreMath } from "./editorDocument";
 
 // Inherited: written only when different from the parent's value
 const INHERITED = [
@@ -14,7 +14,7 @@ const INHERITED = [
 // Not inherited: written only when different from the browser default for that tag
 const SIDES = ["top", "right", "bottom", "left"];
 const BOX = [
-  "display", "background-color", "background-image",
+  "display", "background-color", "background-image", "background-size", "background-position", "background-repeat",
   ...SIDES.flatMap((s) => [`padding-${s}`, `margin-${s}`]),
   "border-top-left-radius", "border-top-right-radius", "border-bottom-right-radius", "border-bottom-left-radius",
   "vertical-align",
@@ -83,7 +83,22 @@ function styleFor(el: HTMLElement, win: Window, defaults: Defaults): Map<string,
       out.set(`border-${side}`, `${width} ${style} ${cs.getPropertyValue(`border-${side}-color`)}`);
     }
   }
-  if (out.get("background-image") === "none") out.delete("background-image");
+  if (cs.backgroundImage === "none") {
+    ["background-image", "background-size", "background-position", "background-repeat"].forEach((p) => out.delete(p));
+  }
+  // Positioning inside a box (e.g. a "Calculations" label in the corner of a work box).
+  // Fixed/sticky toolbars were already neutralized, so only relative/absolute are kept.
+  if (cs.position === "relative") {
+    out.set("position", "relative");
+    if (px(cs.top)) out.set("top", cs.top);
+    if (px(cs.left)) out.set("left", cs.left);
+  } else if (cs.position === "absolute") {
+    // Resolved offsets are px from the containing block; top/left + width place it exactly
+    out.set("position", "absolute");
+    out.set("top", cs.top);
+    out.set("left", cs.left);
+    out.set("width", `${el.getBoundingClientRect().width.toFixed(1)}px`);
+  }
   // Underline/strike-through: its color defaults to the text color, so only write it when used
   const decoration = cs.getPropertyValue("text-decoration-line");
   if (decoration !== "none" && decoration !== (parentCs?.getPropertyValue("text-decoration-line") ?? "none")) {
@@ -104,7 +119,7 @@ function styleFor(el: HTMLElement, win: Window, defaults: Defaults): Map<string,
   if (MEDIA.has(el.tagName)) {
     out.set("width", `${rect.width.toFixed(1)}px`);
     out.set("height", `${rect.height.toFixed(1)}px`);
-  } else if (!inTable && !isBody && parent) {
+  } else if (!inTable && !isBody && parent && cs.position !== "absolute") {
     if (cs.display.startsWith("inline-")) {
       out.set("width", `${rect.width.toFixed(1)}px`);
     } else if (cs.display !== "inline") {
@@ -182,7 +197,9 @@ export function flattenDocument(liveDoc: Document, title: string): FlattenResult
   const pseudoTables = countPseudoTables(liveDoc);
   const defaults = new Defaults();
   const liveEls = [liveDoc.body, ...Array.from(liveDoc.body.querySelectorAll<HTMLElement>("*"))];
-  const styles = liveEls.map((el) => (el.matches(SKIP) || el.tagName.includes("-") ? null : styleFor(el, win, defaults)));
+  // Page breaks are editor markup styled by the editor's own CSS: leave them untouched
+  const styles = liveEls.map((el) =>
+    el.matches(SKIP) || el.tagName.includes("-") || el.classList.contains("page-break") ? null : styleFor(el, win, defaults));
   defaults.dispose();
 
   const clone = liveDoc.body.cloneNode(true) as HTMLElement;
