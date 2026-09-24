@@ -1,10 +1,50 @@
-import React, { useState } from 'react';
-import { useStore } from '../store';
-import { FileText, Plus, Trash2, Copy, Edit2 } from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import { useStore, useSaveStatus, STORAGE_LIMIT_CHARS } from '../store';
+import { downloadBackup, parseBackup } from '../backup';
+import { FileText, Plus, Trash2, Copy, Edit2, Download, Upload, HardDrive } from 'lucide-react';
+
+const BACKUP_REMINDER_MS = 7 * 24 * 60 * 60 * 1000;
+
+const formatDate = (time: number) =>
+  new Date(time).toLocaleDateString('id-ID', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 
 export const Dashboard: React.FC = () => {
-  const { plans, createPlan, deletePlan, duplicatePlan, setCurrentPlanId } = useStore();
+  const { plans, createPlan, deletePlan, duplicatePlan, setCurrentPlanId, lastBackupAt, setLastBackupAt, importPlans } = useStore();
+  const usedChars = useSaveStatus((s) => s.usedChars);
   const [newTitle, setNewTitle] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [openedAt] = useState(() => Date.now());
+
+  const usedPercent = Math.min(100, Math.round((usedChars / STORAGE_LIMIT_CHARS) * 100));
+  const needsBackup = plans.length > 0 && (!lastBackupAt || openedAt - lastBackupAt > BACKUP_REMINDER_MS);
+
+  const handleBackup = () => {
+    downloadBackup(plans);
+    setLastBackupAt(Date.now());
+  };
+
+  const handleRestore = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow choosing the same file again
+    if (!file) return;
+    try {
+      const incoming = parseBackup(await file.text());
+      if (!window.confirm(
+        `Pulihkan ${incoming.length} dokumen dari "${file.name}"?\n\n` +
+        'Dokumen baru akan ditambahkan. Dokumen yang sudah ada hanya diganti jika versi di backup lebih baru.'
+      )) return;
+      const { added, updated, skipped } = importPlans(incoming);
+      alert(`Pemulihan selesai.\n${added} ditambahkan, ${updated} diperbarui, ${skipped} dilewati (versi di perangkat ini sama atau lebih baru).`);
+    } catch (err) {
+      alert(`Gagal memulihkan backup: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
 
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault();
@@ -22,6 +62,41 @@ export const Dashboard: React.FC = () => {
           <p className="text-gray-600">Kelola dan edit RPP Anda dengan mudah</p>
         </div>
       </header>
+
+      <div className={`rounded-lg p-4 mb-6 border flex flex-wrap items-center gap-4 ${needsBackup ? 'bg-amber-50 border-amber-300' : 'bg-white border-gray-200'}`}>
+        <div className="flex-1 min-w-60">
+          <div className="flex items-center text-sm font-medium text-gray-700">
+            <HardDrive className="h-4 w-4 mr-2 text-gray-500" />
+            Penyimpanan browser: {(usedChars / 1_000_000).toFixed(2)} MB dari ±5 MB ({usedPercent}%)
+          </div>
+          <div className="h-1.5 bg-gray-200 rounded mt-2 overflow-hidden">
+            <div
+              className={`h-full ${usedPercent >= 80 ? 'bg-red-500' : 'bg-blue-500'}`}
+              style={{ width: `${usedPercent}%` }}
+            />
+          </div>
+          <p className={`text-xs mt-2 ${needsBackup ? 'text-amber-800 font-medium' : 'text-gray-500'}`}>
+            {lastBackupAt ? `Backup terakhir: ${formatDate(lastBackupAt)}.` : 'Belum pernah backup.'}
+            {needsBackup && ' Dokumen hanya tersimpan di browser ini — unduh backup secara berkala.'}
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={handleBackup}
+            disabled={plans.length === 0}
+            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 rounded-md"
+          >
+            <Download className="h-4 w-4" /> Unduh Backup
+          </button>
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-white hover:bg-gray-100 border border-gray-300 rounded-md"
+          >
+            <Upload className="h-4 w-4" /> Pulihkan Backup
+          </button>
+          <input ref={fileInputRef} type="file" accept=".json,application/json" onChange={handleRestore} className="hidden" />
+        </div>
+      </div>
 
       <div className="bg-white rounded-lg shadow-sm p-6 mb-8 border border-gray-200">
         <h2 className="text-lg font-semibold mb-4 flex items-center">
@@ -52,7 +127,7 @@ export const Dashboard: React.FC = () => {
             Belum ada dokumen. Buat dokumen pertama Anda di atas.
           </div>
         ) : (
-          plans.sort((a, b) => b.updatedAt - a.updatedAt).map((plan) => (
+          [...plans].sort((a, b) => b.updatedAt - a.updatedAt).map((plan) => (
             <div
               key={plan.id}
               className="bg-white rounded-lg p-5 border border-gray-200 hover:shadow-md transition-shadow flex items-center justify-between group"
@@ -69,13 +144,7 @@ export const Dashboard: React.FC = () => {
                     {plan.title}
                   </h3>
                   <p className="text-sm text-gray-500">
-                    Terakhir diubah: {new Date(plan.updatedAt).toLocaleDateString('id-ID', {
-                      day: 'numeric',
-                      month: 'long',
-                      year: 'numeric',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}
+                    Terakhir diubah: {formatDate(plan.updatedAt)}
                   </p>
                 </div>
               </div>

@@ -1,6 +1,10 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import { v4 as uuidv4 } from 'uuid';
+
+export const STORAGE_KEY = 'lesson-plan-storage';
+// Browsers allow roughly 5 million characters per origin in localStorage.
+export const STORAGE_LIMIT_CHARS = 5_000_000;
 
 export interface LessonPlan {
   id: string;
@@ -10,10 +14,53 @@ export interface LessonPlan {
   updatedAt: number;
 }
 
+// Save status lives in its own store: updating it from inside the persist
+// storage must not trigger another persist write.
+interface SaveStatus {
+  error: string | null;
+  usedChars: number;
+}
+
+export const useSaveStatus = create<SaveStatus>()(() => ({
+  error: null,
+  usedChars: 0,
+}));
+
+const safeLocalStorage = {
+  getItem: (name: string) => {
+    const value = localStorage.getItem(name);
+    useSaveStatus.setState({ usedChars: value?.length ?? 0 });
+    return value;
+  },
+  setItem: (name: string, value: string) => {
+    try {
+      localStorage.setItem(name, value);
+      useSaveStatus.setState({ error: null, usedChars: value.length });
+    } catch (err) {
+      const quota = err instanceof DOMException && err.name === 'QuotaExceededError';
+      useSaveStatus.setState({
+        error: quota
+          ? 'Memori browser penuh — perubahan terakhir TIDAK tersimpan.'
+          : `Gagal menyimpan: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  },
+  removeItem: (name: string) => localStorage.removeItem(name),
+};
+
+export interface ImportResult {
+  added: number;
+  updated: number;
+  skipped: number;
+}
+
 interface AppState {
   plans: LessonPlan[];
   currentPlanId: string | null;
   paperSize: string;
+  lastBackupAt: number | null;
+  setLastBackupAt: (time: number) => void;
+  importPlans: (plans: LessonPlan[]) => ImportResult;
   setPaperSize: (size: string) => void;
   setCurrentPlanId: (id: string | null) => void;
   createPlan: (title: string, content?: string) => string;
@@ -28,6 +75,29 @@ export const useStore = create<AppState>()(
       plans: [],
       currentPlanId: null,
       paperSize: 'a4',
+      lastBackupAt: null,
+
+      setLastBackupAt: (time) => set({ lastBackupAt: time }),
+
+      // Merge by id: new plans are added, existing ones are replaced only if the backup copy is newer.
+      importPlans: (incoming) => {
+        const result: ImportResult = { added: 0, updated: 0, skipped: 0 };
+        const byId = new Map(get().plans.map((p) => [p.id, p]));
+        for (const plan of incoming) {
+          const existing = byId.get(plan.id);
+          if (!existing) {
+            byId.set(plan.id, plan);
+            result.added++;
+          } else if (plan.updatedAt > existing.updatedAt) {
+            byId.set(plan.id, plan);
+            result.updated++;
+          } else {
+            result.skipped++;
+          }
+        }
+        set({ plans: Array.from(byId.values()) });
+        return result;
+      },
 
       setPaperSize: (size) => set({ paperSize: size }),
 
@@ -88,7 +158,8 @@ export const useStore = create<AppState>()(
       },
     }),
     {
-      name: 'lesson-plan-storage', // name of item in the storage (must be unique)
+      name: STORAGE_KEY, // name of item in the storage (must be unique)
+      storage: createJSONStorage(() => safeLocalStorage),
     }
   )
 );
