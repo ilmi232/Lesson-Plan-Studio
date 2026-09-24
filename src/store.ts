@@ -60,6 +60,9 @@ interface AppState {
   plans: LessonPlan[];
   currentPlanId: string | null;
   paperSize: string;
+  // Editor view: separate paper sheets like Word, or one continuous page with guides
+  sheetView: boolean;
+  setSheetView: (on: boolean) => void;
   lastBackupAt: number | null;
   setLastBackupAt: (time: number) => void;
   importPlans: (plans: LessonPlan[]) => ImportResult;
@@ -80,6 +83,9 @@ export const useStore = create<AppState>()(
       currentPlanId: null,
       paperSize: 'a4',
       lastBackupAt: null,
+      sheetView: true,
+
+      setSheetView: (on) => set({ sheetView: on }),
 
       setLastBackupAt: (time) => set({ lastBackupAt: time }),
 

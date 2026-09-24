@@ -10,8 +10,13 @@ interface TableGrid {
   width: number;
 }
 
+// Rows of the document, without the editor's page-gap spacer rows (see pagination.ts)
+export function rowsOf(table: HTMLTableElement): HTMLTableRowElement[] {
+  return Array.from(table.rows).filter((r) => !r.hasAttribute("data-agy-gap"));
+}
+
 export function buildGrid(table: HTMLTableElement): TableGrid {
-  const rows = Array.from(table.rows);
+  const rows = rowsOf(table);
   const grid: Cell[][] = rows.map(() => []);
   const pos = new Map<Cell, { row: number; col: number }>();
   rows.forEach((row, r) => {
@@ -158,8 +163,8 @@ export function deleteColumns(table: HTMLTableElement, cell: Cell): boolean {
   const start = pos.get(cell)!.col;
   for (let c = start + span(cell).cols - 1; c >= start; c--) deleteColumn(table, c);
   // Rows left without cells go through deleteRow so rowspans crossing them shrink too
-  for (let r = table.rows.length - 1; r >= 0; r--) {
-    if (table.rows[r].cells.length === 0) deleteRow(table, r);
+  for (let r = rowsOf(table).length - 1; r >= 0; r--) {
+    if (rowsOf(table)[r].cells.length === 0) deleteRow(table, r);
   }
   return buildGrid(table).width > 0;
 }
@@ -167,7 +172,7 @@ export function deleteColumns(table: HTMLTableElement, cell: Cell): boolean {
 export function insertRowAfter(table: HTMLTableElement, cell: Cell) {
   const { grid, pos, width } = buildGrid(table);
   const target = pos.get(cell)!.row + span(cell).rows - 1;
-  const targetRow = table.rows[target];
+  const targetRow = rowsOf(table)[target];
   const newRow = targetRow.cloneNode(false) as HTMLTableRowElement;
   const handled = new Set<Cell>();
   for (let c = 0; c < width; c++) {
@@ -188,8 +193,8 @@ export function insertRowAfter(table: HTMLTableElement, cell: Cell) {
 
 function deleteRow(table: HTMLTableElement, r: number) {
   const { grid, pos, width } = buildGrid(table);
-  const row = table.rows[r];
-  const nextRow = table.rows[r + 1] as HTMLTableRowElement | undefined;
+  const row = rowsOf(table)[r];
+  const nextRow = rowsOf(table)[r + 1] as HTMLTableRowElement | undefined;
   const handled = new Set<Cell>();
   for (let c = 0; c < width; c++) {
     const current = grid[r][c];
@@ -216,5 +221,5 @@ export function deleteRows(table: HTMLTableElement, cell: Cell): boolean {
   const { pos } = buildGrid(table);
   const start = pos.get(cell)!.row;
   for (let r = start + span(cell).rows - 1; r >= start; r--) deleteRow(table, r);
-  return table.rows.length > 0;
+  return rowsOf(table).length > 0;
 }

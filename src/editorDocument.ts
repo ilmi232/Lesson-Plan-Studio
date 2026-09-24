@@ -14,6 +14,9 @@ export function serializeDoc(doc: Document): string {
   if (doc.body && cloneBody) restoreMath(doc.body, cloneBody);
   removeMathJaxStyles(root);
   root.querySelectorAll("[data-agy-keep]").forEach((el) => el.removeAttribute("data-agy-keep"));
+  root.querySelectorAll("[data-agy-break]").forEach((el) => el.removeAttribute("data-agy-break"));
+  // Sheet-view spacers are editor layout only
+  root.querySelectorAll("[data-agy-gap]").forEach((el) => el.remove());
   root.querySelectorAll<HTMLElement>("td, th").forEach((cell) => {
     if (!cell.style.cursor) return;
     cell.style.cursor = "";

@@ -7,7 +7,7 @@ import { printDocument } from '../pagination';
 import { buildWordHtml } from '../wordExport';
 
 export const EditorPage: React.FC = () => {
-  const { currentPlanId, plans, updatePlan, setCurrentPlanId, paperSize, setPaperSize } = useStore();
+  const { currentPlanId, plans, updatePlan, setCurrentPlanId, paperSize, setPaperSize, sheetView } = useStore();
   const plan = plans.find((p) => p.id === currentPlanId);
   const [showFindReplace, setShowFindReplace] = useState(false);
   const [findText, setFindText] = useState('');
@@ -24,7 +24,7 @@ export const EditorPage: React.FC = () => {
   // "Save as PDF" in the print dialog produces the PDF.
   const handlePrint = () => {
     const iframe = document.querySelector<HTMLIFrameElement>('#print-content iframe');
-    if (iframe) printDocument(iframe, paperSize, plan.title);
+    if (iframe) printDocument(iframe, paperSize, plan.title, sheetView);
   };
 
   const handleExportDocx = () => {

@@ -6,7 +6,7 @@ import { serializeDoc, prepareForEditor, writeToIframe, onceParsed } from "../ed
 import { callGemini, getGeminiKey, describeGeminiError } from "../gemini";
 import { restructureDocument, type RestructureResult } from "../restructure";
 import { flattenDocument } from "../flatten";
-import { computePageStarts, PRINT_MARGIN_MM } from "../pagination";
+import { computePageStarts, layoutSheets, removeSheetGaps, sheetHeightPx, SHEET_GAP_PX, PRINT_MARGIN_MM, type Sheet } from "../pagination";
 import { RestructurePreview } from "./RestructurePreview";
 import { buildGrid, freezeColumnWidths, insertColumnAfter, insertRowAfter, deleteColumns, deleteRows } from "../tableOps";
 import { CopyPromptButton } from "./CopyPromptButton";
@@ -81,7 +81,7 @@ const PAGE_BREAK_CSS = `
     position: static !important;
   }
   .page-break::before {
-    content: "✂ BATAS HALAMAN — teks setelah ini pindah ke halaman baru saat Print/PDF";
+    content: "✂ BATAS HALAMAN MANUAL — hapus: Backspace di awal halaman berikutnya";
   }
   @media print {
     .page-break {
@@ -122,7 +122,8 @@ function attachTableResizer(doc: Document) {
     }
 
     const target = e.target as HTMLElement;
-    if (!target || (target.tagName !== "TD" && target.tagName !== "TH")) {
+    // Header copies on continuation sheets (data-agy-gap) are editor-only, not real cells
+    if (!target || (target.tagName !== "TD" && target.tagName !== "TH") || target.closest("[data-agy-gap]")) {
       if (currentCell) { currentCell.style.cursor = ""; currentCell = null; resizeMode = null; }
       return;
     }
@@ -190,6 +191,40 @@ function attachTableResizer(doc: Document) {
   });
 }
 
+const BLOCK = "p, div, li, h1, h2, h3, h4, h5, h6, td, th, section, article, blockquote, pre";
+
+// Backspace at the very start of the block right after a manual page break (Delete: at the end
+// of the block right before it) removes the break, like deleting a page break in Word.
+function removeAdjacentPageBreak(doc: Document, direction: "before" | "after"): boolean {
+  const sel = doc.getSelection();
+  if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return false;
+  const caret = sel.getRangeAt(0);
+  const start = caret.startContainer.nodeType === Node.ELEMENT_NODE
+    ? (caret.startContainer as Element) : caret.startContainer.parentElement;
+  const block = start?.closest(BLOCK);
+  if (!block || block === doc.body) return false;
+  // Nothing between the caret and the block edge
+  const probe = doc.createRange();
+  probe.selectNodeContents(block);
+  if (direction === "before") probe.setEnd(caret.startContainer, caret.startOffset);
+  else probe.setStart(caret.startContainer, caret.startOffset);
+  if (probe.toString().replace(/\u200b/g, "").trim()) return false;
+  let node: Element | null = block;
+  while (node && node !== doc.body) {
+    let sibling = direction === "before" ? node.previousElementSibling : node.nextElementSibling;
+    while (sibling?.hasAttribute("data-agy-gap")) {
+      sibling = direction === "before" ? sibling.previousElementSibling : sibling.nextElementSibling;
+    }
+    if (sibling) {
+      if (!sibling.classList.contains("page-break")) return false;
+      sibling.remove();
+      return true;
+    }
+    node = node.parentElement;
+  }
+  return false;
+}
+
 const MenuItem: React.FC<{ icon: React.ReactNode; title: string; hint: string; onClick: () => void }> = ({ icon, title, hint, onClick }) => (
   <button onClick={onClick} className="w-full flex items-start gap-2.5 px-3 py-2 text-left hover:bg-emerald-50">
     <span className="mt-0.5 text-emerald-700">{icon}</span>
@@ -198,7 +233,7 @@ const MenuItem: React.FC<{ icon: React.ReactNode; title: string; hint: string; o
 );
 
 export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
-  const { plans, updatePlan, replaceContent, restorePreviousVersion, paperSize } = useStore();
+  const { plans, updatePlan, replaceContent, restorePreviousVersion, paperSize, sheetView, setSheetView } = useStore();
   const plan = plans.find((p) => p.id === planId);
   // One AI task at a time; the label shows progress on the button that started it
   const [aiTask, setAiTask] = useState<{ kind: "flatten" | "table" | "doc"; label: string } | null>(null);
@@ -216,29 +251,44 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
   const [preview, setPreview] = useState<{ before: string; after: string; result: RestructureResult } | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
-  // Page guides: where the printed pages will start, recomputed shortly after layout changes
-  const [pageStarts, setPageStarts] = useState<number[]>([]);
-  const paperSizeRef = useRef(paperSize);
-  const guideTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const schedulePageGuides = () => {
-    clearTimeout(guideTimer.current);
-    guideTimer.current = setTimeout(() => {
-      const doc = iframeRef.current?.contentDocument;
-      if (!doc?.body) return;
-      const next = computePageStarts(doc, paperSizeRef.current).map(Math.round);
-      setPageStarts((prev) => (prev.length === next.length && prev.every((v, i) => v === next[i]) ? prev : next));
-    }, 300);
-  };
+  // Page layout, recomputed shortly after changes: separate sheets (spacers pushed into the
+  // document, see pagination.ts) or, in continuous view, guide lines where pages will start.
+  const [pageLayout, setPageLayout] = useState<{ sheets: Sheet[]; guides: number[] }>({ sheets: [], guides: [] });
+  const layoutOptions = useRef({ paperSize, sheetView });
+  const sheetBottom = useRef(0);
+  const layoutTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const adjustHeightRef = useRef<(relayout?: boolean) => void>(() => {});
+  function runLayout() {
+    const doc = iframeRef.current?.contentDocument;
+    if (!doc?.body) return;
+    const { paperSize: paper, sheetView: sheets } = layoutOptions.current;
+    if (sheets) {
+      const layout = layoutSheets(doc, paper);
+      sheetBottom.current = layout.totalHeight;
+      setPageLayout({ sheets: layout.sheets, guides: [] });
+    } else {
+      removeSheetGaps(doc);
+      sheetBottom.current = 0;
+      setPageLayout({ sheets: [], guides: computePageStarts(doc, paper).map(Math.round) });
+    }
+    // Our own spacer changes must not trigger another layout round
+    (doc as any)._heightObserver?.takeRecords();
+    adjustHeightRef.current(false);
+  }
+  function scheduleLayout() {
+    clearTimeout(layoutTimer.current);
+    layoutTimer.current = setTimeout(runLayout, 250);
+  }
   useEffect(() => {
-    paperSizeRef.current = paperSize;
-    schedulePageGuides();
-    return () => clearTimeout(guideTimer.current);
-  }, [paperSize]); // eslint-disable-line react-hooks/exhaustive-deps
+    layoutOptions.current = { paperSize, sheetView };
+    scheduleLayout();
+    return () => clearTimeout(layoutTimer.current);
+  }, [paperSize, sheetView]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Size the iframe to its content. Measured from the content itself, not scrollHeight: the
-  // document's scrollHeight is never smaller than the iframe, so it could only ever grow
-  // (every keystroke added 60px of blank space at the end).
-  const adjustHeight = useCallback(() => {
+  // Size the iframe to its content (and, in sheet view, to the last full sheet). Measured from the
+  // content itself, not scrollHeight: the document's scrollHeight is never smaller than the
+  // iframe, so it could only ever grow (every keystroke added 60px of blank space at the end).
+  const adjustHeight = useCallback((relayout = true) => {
     const iframe = iframeRef.current;
     const doc = iframe?.contentDocument;
     const win = doc?.defaultView;
@@ -251,13 +301,19 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     const contentBottom = range.getBoundingClientRect().bottom + win.scrollY +
       parseFloat(bodyStyle.paddingBottom) + parseFloat(bodyStyle.marginBottom) +
       parseFloat(win.getComputedStyle(doc.documentElement).paddingBottom);
-    const target = Math.max(Math.ceil(contentBottom), 300) + 60;
+    const target = sheetBottom.current > 0
+      ? Math.max(Math.ceil(sheetBottom.current), Math.ceil(contentBottom))
+      : Math.max(Math.ceil(contentBottom), 300) + 60;
     const current = parseInt(iframe.style.height || "0", 10);
     if (Math.abs(target - current) > 2) iframe.style.height = `${target}px`;
     if (scrollContainer && savedScroll > 0) scrollContainer.scrollTop = savedScroll;
-    schedulePageGuides();
+    if (relayout) scheduleLayout();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { adjustHeightRef.current = adjustHeight; }, [adjustHeight]);
 
+  // Word-like keys: Ctrl+Enter inserts a page break; Backspace at the start of the page after a
+  // manual break (or Delete at the end of the page before it) removes the break.
+  const insertPageBreakRef = useRef<() => void>(() => {});
 
   const setupIframe = useCallback((doc: Document) => {
     doc.designMode = "on";
@@ -281,6 +337,23 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     };
     doc.addEventListener("input", newHandler);
     (doc as any)._inputHandler = newHandler;
+
+    const oldKeys = (doc as any)._keyHandler;
+    if (oldKeys) doc.removeEventListener("keydown", oldKeys);
+    const keyHandler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        e.preventDefault();
+        insertPageBreakRef.current();
+        return;
+      }
+      if ((e.key === "Backspace" || e.key === "Delete") && !e.ctrlKey && !e.metaKey && !e.altKey &&
+          removeAdjacentPageBreak(doc, e.key === "Backspace" ? "before" : "after")) {
+        e.preventDefault();
+        doc.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    };
+    doc.addEventListener("keydown", keyHandler);
+    (doc as any)._keyHandler = keyHandler;
 
     const oldObserver = (doc as any)._heightObserver;
     if (oldObserver) oldObserver.disconnect();
@@ -366,7 +439,9 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     while (node && node.nodeName !== "TD" && node.nodeName !== "TH" && node.nodeName !== "BODY") {
       node = node.parentNode;
     }
-    return node && (node.nodeName === "TD" || node.nodeName === "TH") ? (node as HTMLTableCellElement) : null;
+    const cell = node && (node.nodeName === "TD" || node.nodeName === "TH") ? (node as HTMLTableCellElement) : null;
+    // Header copies on continuation sheets are editor-only, not part of the table
+    return cell && !cell.closest("[data-agy-gap]") ? cell : null;
   };
 
   const handleTableAction = (action: string) => {
@@ -424,6 +499,7 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     const doc = iframeRef.current?.contentDocument;
     if (!doc?.body || !plan) return;
     setMenuOpen(false);
+    removeSheetGaps(doc);
     setAiTask({ kind: "flatten", label: "Merapikan..." });
     let pseudoTables = 0;
     try {
@@ -452,6 +528,8 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     const previous = restorePreviousVersion(planId);
     if (previous !== null) loadIntoEditor(previous);
   };
+
+  useEffect(() => { insertPageBreakRef.current = handleInsertPageBreak; });
 
   const handleMagicPaste = async () => {
     try {
@@ -486,6 +564,7 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     }
     const apiKey = getGeminiKey();
     if (!apiKey) return;
+    removeSheetGaps(doc);
     setAiTask({ kind: "table", label: "Memproses..." });
     try {
       const prompt = `Kamu adalah asisten perapih tabel HTML untuk RPP (Rencana Pelaksanaan Pembelajaran).
@@ -523,6 +602,7 @@ ${targetTable.outerHTML}`;
     const apiKey = getGeminiKey();
     if (!apiKey) return;
     setAiTask({ kind: "doc", label: "Menyiapkan..." });
+    removeSheetGaps(doc);
     // Edits made while the AI works would be lost when the result is applied
     doc.designMode = "off";
     try {
@@ -606,8 +686,44 @@ ${targetTable.outerHTML}`;
       <div id="editor-scroll-container" className="w-full bg-[#e5e7eb] overflow-y-auto pb-20 pt-4 flex-1">
         <div className="relative mx-auto bg-white shadow-lg flex flex-col" style={{ ...paperStyle, padding: 0 }} id="print-content">
           <iframe key={frameKey} ref={iframeRef} style={{ width: "100%", flex: "1 1 auto", border: "none", display: "block", minHeight: paperStyle.minHeight }} title="Editor" />
-          {/* Overlay outside the document, so the guides are never saved or printed */}
-          {pageStarts.map((top, i) => (
+          {/* Overlay outside the document: never saved or printed */}
+          {pageLayout.sheets.map((sheet, i) => {
+            const last = i === pageLayout.sheets.length - 1;
+            return (
+              <React.Fragment key={i}>
+                <span className="absolute right-3 text-[10px] font-medium text-gray-400 pointer-events-none" style={{ top: sheet.top + 8 }}>
+                  Halaman {i + 1}
+                </span>
+                {sheet.empty && (
+                  <div className="absolute left-0 right-0 text-center pointer-events-none" style={{ top: sheet.top + sheetHeightPx(paperSize) / 2 - 24 }}>
+                    <div className="text-sm font-semibold text-gray-400">Halaman kosong</div>
+                    <div className="text-xs text-gray-400">Hapus baris kosong, atau tekan Backspace di awal halaman berikutnya untuk menghapus batas halaman</div>
+                  </div>
+                )}
+                {!last && sheet.gapAfter && (
+                  <>
+                    {/* Page margins stay blank, like paper: hides spacer rows and the borders of a
+                        table or box that continues on the next sheet (no text is ever placed here) */}
+                    <div className="absolute left-0 right-0 pointer-events-none bg-white"
+                      style={{ top: sheet.blankFrom, height: pageLayout.sheets[i + 1].contentTop - sheet.blankFrom }} />
+                    <div
+                      className="absolute -left-2 -right-2 pointer-events-none bg-[#e5e7eb]"
+                      style={{ top: sheet.top + sheetHeightPx(paperSize), height: SHEET_GAP_PX,
+                        boxShadow: "inset 0 7px 6px -6px rgba(0,0,0,.25), inset 0 -7px 6px -6px rgba(0,0,0,.25)" }}
+                    />
+                  </>
+                )}
+                {!last && !sheet.gapAfter && (
+                  <div className="absolute left-0 right-0 pointer-events-none border-t-2 border-dashed border-sky-400" style={{ top: sheet.contentBottom }}>
+                    <span className="absolute right-2 -top-3 text-[10px] font-medium text-sky-700 bg-sky-50 border border-sky-200 rounded px-1.5">
+                      Halaman {i + 2} (bagian ini terlalu tinggi untuk dipindah utuh)
+                    </span>
+                  </div>
+                )}
+              </React.Fragment>
+            );
+          })}
+          {pageLayout.guides.map((top, i) => (
             <div key={i} className="absolute left-0 right-0 pointer-events-none border-t-2 border-dashed border-sky-400" style={{ top }}>
               <span className="absolute right-2 -top-3 text-[10px] font-medium text-sky-700 bg-sky-50 border border-sky-200 rounded px-1.5">
                 Halaman {i + 2}
@@ -615,9 +731,16 @@ ${targetTable.outerHTML}`;
             </div>
           ))}
         </div>
-        <p className="text-center text-xs text-gray-500 mt-3">
-          Perkiraan {pageStarts.length + 1} halaman saat dicetak — garis biru putus-putus = batas halaman otomatis.
-        </p>
+        <div className="flex items-center justify-center gap-3 text-xs text-gray-500 mt-3">
+          <span>
+            {sheetView ? pageLayout.sheets.length : pageLayout.guides.length + 1} halaman saat dicetak
+            {sheetView ? " — Ctrl+Enter untuk pindah halaman" : " — garis biru = batas halaman otomatis"}
+          </span>
+          <span className="inline-flex rounded border border-gray-300 overflow-hidden">
+            <button onClick={() => setSheetView(true)} className={`px-2 py-0.5 ${sheetView ? "bg-gray-700 text-white" : "bg-white hover:bg-gray-100"}`}>Per halaman</button>
+            <button onClick={() => setSheetView(false)} className={`px-2 py-0.5 ${!sheetView ? "bg-gray-700 text-white" : "bg-white hover:bg-gray-100"}`}>Menerus</button>
+          </span>
+        </div>
       </div>
       {preview && (
         <RestructurePreview

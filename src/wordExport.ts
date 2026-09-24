@@ -65,7 +65,7 @@ export function buildWordHtml(doc: Document, title: string): string {
       copy.style.color = cs.color;
     }
     // Content inside table cells (answer boxes, blanks) is converted too; the table parts themselves are not
-    if (!copy || el.closest("mjx-container, svg, math") || /^(TABLE|THEAD|TBODY|TFOOT|TR|TD|TH|COL|COLGROUP|CAPTION)$/.test(el.tagName)) return;
+    if (!copy || el.closest("mjx-container, svg, math, [data-agy-gap]") || /^(TABLE|THEAD|TBODY|TFOOT|TR|TD|TH|COL|COLGROUP|CAPTION)$/.test(el.tagName)) return;
     const cs = win.getComputedStyle(el);
     const rect = el.getBoundingClientRect();
     const empty = !el.textContent?.trim() && !el.querySelector("img, svg, table, math, mjx-container");
@@ -97,7 +97,7 @@ export function buildWordHtml(doc: Document, title: string): string {
     }
   });
 
-  root.querySelectorAll("script, #agy-style, #agy-csp, #agy-print, meta[http-equiv], title").forEach((el) => el.remove());
+  root.querySelectorAll("script, #agy-style, #agy-csp, #agy-print, meta[http-equiv], title, [data-agy-gap]").forEach((el) => el.remove());
   removeMathJaxStyles(root);
   root.querySelectorAll("[data-agy-keep]").forEach((el) => el.removeAttribute("data-agy-keep"));
 

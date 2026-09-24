@@ -84,7 +84,7 @@ export function releaseArtificialHeights(doc: Document): number {
   let changed = 0;
   // Deepest first, so a parent is measured after its tall children shrank
   for (const el of Array.from(doc.body.querySelectorAll<HTMLElement>("*")).reverse()) {
-    if (el.closest("table") || el.matches("img, svg, canvas, video, iframe, math") || el.tagName.includes("-")) continue;
+    if (el.closest("table, [data-agy-gap]") || el.matches("img, svg, canvas, video, iframe, math") || el.tagName.includes("-")) continue;
     const rect = el.getBoundingClientRect();
     if (rect.height < TALL_PX) continue;
     const cs = win.getComputedStyle(el);
@@ -121,7 +121,7 @@ export function stripRenderedChrome(doc: Document): number {
   }
 
   for (const el of Array.from(doc.body.querySelectorAll<HTMLElement>("*"))) {
-    if (!el.isConnected) continue;
+    if (!el.isConnected || el.closest("[data-agy-gap]")) continue;
     const position = win.getComputedStyle(el).position;
     if (position !== "fixed" && position !== "sticky") continue;
     const hasAction = isActionButton(el) || Array.from(el.querySelectorAll("button, [role='button']")).some(isActionButton);
