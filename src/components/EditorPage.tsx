@@ -91,24 +91,33 @@ export const EditorPage: React.FC = () => {
 
   const handleReplace = () => {
     if (!findText) return;
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(plan.content, 'text/html');
-    
-    const walk = document.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, null);
+    // Edit the live iframe document; the store is synced by the editor's input handler.
+    // Writing only to the store would be overwritten by the iframe on the next keystroke.
+    const doc = document.querySelector<HTMLIFrameElement>('#print-content iframe')?.contentDocument;
+    if (!doc?.body) return;
+
+    const escaped = findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escaped, 'gi');
+    const walk = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, null);
     let node;
-    const regex = new RegExp(findText, 'gi');
-    let hasChanges = false;
+    let count = 0;
 
     while ((node = walk.nextNode())) {
-      if (regex.test(node.nodeValue || '')) {
-        node.nodeValue = node.nodeValue!.replace(regex, replaceText);
-        hasChanges = true;
-      }
+      const parentTag = node.parentNode?.nodeName;
+      if (parentTag === 'SCRIPT' || parentTag === 'STYLE') continue;
+      const value = node.nodeValue || '';
+      const matches = value.match(regex);
+      if (!matches) continue;
+      count += matches.length;
+      node.nodeValue = value.replace(regex, () => replaceText);
     }
 
-    if (hasChanges) {
-      updatePlan(plan.id, doc.documentElement.outerHTML);
+    if (count === 0) {
+      alert(`Teks "${findText}" tidak ditemukan.`);
+      return;
     }
+    doc.dispatchEvent(new Event('input', { bubbles: true }));
+    alert(`${count} teks berhasil diganti.`);
     setShowFindReplace(false);
   };
 

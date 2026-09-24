@@ -73,6 +73,26 @@ const PAGE_BREAK_CSS = `
   }
 `;
 
+// Editor-only CSS (#agy-style) and resize cursors must never reach the stored document:
+// otherwise exports carry editor visuals and old documents never pick up CSS fixes.
+function serializeDoc(doc: Document): string {
+  const root = doc.documentElement.cloneNode(true) as HTMLElement;
+  root.querySelector("#agy-style")?.remove();
+  root.querySelectorAll<HTMLElement>("td, th").forEach((cell) => {
+    if (!cell.style.cursor) return;
+    cell.style.cursor = "";
+    if (!cell.getAttribute("style")) cell.removeAttribute("style");
+  });
+  return root.outerHTML;
+}
+
+// Strip AI print bars (.no-print) and any editor CSS saved by older versions.
+function cleanHtml(html: string): string {
+  const parsed = new DOMParser().parseFromString(html, "text/html");
+  parsed.querySelectorAll(".no-print, #agy-style").forEach((el) => el.remove());
+  return html.toLowerCase().includes("<html") ? parsed.documentElement.outerHTML : parsed.body.innerHTML;
+}
+
 async function callGemini(apiKey: string, prompt: string): Promise<string> {
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-latest:generateContent?key=${apiKey}`,
@@ -245,12 +265,11 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
   const setupIframe = useCallback((doc: Document) => {
     doc.designMode = "on";
 
-    if (!doc.querySelector("#agy-style")) {
-      const style = doc.createElement("style");
-      style.id = "agy-style";
-      style.textContent = PAGE_BREAK_CSS;
-      doc.head?.appendChild(style);
-    }
+    doc.querySelector("#agy-style")?.remove();
+    const style = doc.createElement("style");
+    style.id = "agy-style";
+    style.textContent = PAGE_BREAK_CSS;
+    doc.head?.appendChild(style);
 
     if (!(doc as any)._tableResizerAttached) {
       attachTableResizer(doc);
@@ -260,7 +279,7 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     const oldHandler = (doc as any)._inputHandler;
     if (oldHandler) doc.removeEventListener("input", oldHandler);
     const newHandler = () => {
-      updatePlan(planId, doc.documentElement.outerHTML);
+      updatePlan(planId, serializeDoc(doc));
       adjustHeight();
     };
     doc.addEventListener("input", newHandler);
@@ -289,16 +308,7 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     if (!doc) return;
     if (doc.body && doc.body.innerHTML.trim().length > 0) return;
 
-    // Strip .no-print elements (AI-generated print buttons/bars) before rendering
-    const stripNoPrint = (html: string): string => {
-      const parser = new DOMParser();
-      const parsed = parser.parseFromString(html, 'text/html');
-      parsed.querySelectorAll('.no-print').forEach(el => el.remove());
-      return parsed.documentElement.outerHTML;
-    };
-
-    let content = plan.content || "";
-    content = stripNoPrint(content);
+    let content = cleanHtml(plan.content || "");
 
     if (!content.toLowerCase().includes("<html")) {
       content = `<!DOCTYPE html><html><head>
@@ -393,15 +403,13 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
       const doc = iframeRef.current?.contentDocument;
       if (!doc) return;
       if (cleaned.toLowerCase().includes("<html")) {
-        // Strip .no-print elements (AI print bars) before writing
-        const parser = new DOMParser();
-        const parsed = parser.parseFromString(cleaned, 'text/html');
-        parsed.querySelectorAll('.no-print').forEach(el => el.remove());
-        cleaned = parsed.documentElement.outerHTML;
+        cleaned = cleanHtml(cleaned);
 
         doc.open(); doc.write(cleaned); doc.close();
-        updatePlan(planId, doc.documentElement.outerHTML);
+        // doc.open() erases every event listener, so the table resizer must be re-attached
+        (doc as any)._tableResizerAttached = false;
         setupIframe(doc);
+        updatePlan(planId, serializeDoc(doc));
       } else {
         exec("insertHTML", cleaned);
       }
