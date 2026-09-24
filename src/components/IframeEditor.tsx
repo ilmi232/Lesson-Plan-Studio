@@ -128,13 +128,41 @@ function onceParsed(doc: Document, fn: () => void) {
 
 // "-latest" alias is updated by Google on each Flash release, so the app doesn't break
 // when a pinned model version is shut down (as happened with gemini-2.0-flash).
-const GEMINI_MODEL = "gemini-flash-latest";
+// Flash-Lite is the fallback when Flash is overloaded: separate capacity and quota.
+const GEMINI_MODELS = ["gemini-flash-latest", "gemini-3.5-flash-lite"];
+// Wait before each retry on the same model (overload spikes are usually short)
+const GEMINI_RETRY_DELAYS_MS = [2000, 5000];
 
 class GeminiKeyError extends Error {}
+class GeminiBusyError extends Error {}   // 429/500/503/504: retry, then try the next model
+class GeminiModelError extends Error {}  // 404: model gone, skip to the next model
 
-async function callGemini(apiKey: string, prompt: string): Promise<string> {
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function callGemini(apiKey: string, prompt: string, onRetry?: (attempt: number) => void): Promise<string> {
+  let lastError: Error = new Error("Gemini tidak merespons.");
+  let attempt = 0;
+  for (const model of GEMINI_MODELS) {
+    for (let i = 0; i <= GEMINI_RETRY_DELAYS_MS.length; i++) {
+      if (attempt > 0) onRetry?.(attempt);
+      attempt++;
+      try {
+        return await requestGemini(model, apiKey, prompt);
+      } catch (err) {
+        if (!(err instanceof GeminiBusyError || err instanceof GeminiModelError)) throw err;
+        // Keep the overload error for the user; a 404 on the fallback would only confuse
+        if (err instanceof GeminiBusyError || !(lastError instanceof GeminiBusyError)) lastError = err;
+        if (err instanceof GeminiModelError || i === GEMINI_RETRY_DELAYS_MS.length) break;
+        await sleep(GEMINI_RETRY_DELAYS_MS[i]);
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function requestGemini(model: string, apiKey: string, prompt: string): Promise<string> {
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
     {
       method: "POST",
       // Key goes in a header, not the URL, so it doesn't end up in logs or history
@@ -153,7 +181,10 @@ async function callGemini(apiKey: string, prompt: string): Promise<string> {
     const invalidKey =
       response.status === 401 || response.status === 403 ||
       (err?.error?.details ?? []).some((d: { reason?: string }) => d?.reason === "API_KEY_INVALID");
-    throw invalidKey ? new GeminiKeyError(message) : new Error(message);
+    if (invalidKey) throw new GeminiKeyError(message);
+    if ([429, 500, 503, 504].includes(response.status)) throw new GeminiBusyError(message);
+    if (response.status === 404) throw new GeminiModelError(message);
+    throw new Error(message);
   }
   const data = await response.json();
   const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
@@ -288,7 +319,7 @@ function attachTableResizer(doc: Document) {
 export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
   const { plans, updatePlan, paperSize } = useStore();
   const plan = plans.find((p) => p.id === planId);
-  const [aiBusy, setAiBusy] = useState(false);
+  const [aiStatus, setAiStatus] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   const adjustHeight = useCallback((forceReset = false) => {
@@ -471,7 +502,7 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     if (!targetTable) {
       alert("Tidak ada tabel yang ditemukan. Klik di dalam tabel terlebih dahulu."); return;
     }
-    setAiBusy(true);
+    setAiStatus("Memproses...");
     try {
       const prompt = `Kamu adalah asisten perapih tabel HTML untuk RPP (Rencana Pelaksanaan Pembelajaran).
 Perbaiki tabel HTML di bawah ini agar:
@@ -482,7 +513,7 @@ Perbaiki tabel HTML di bawah ini agar:
 5. Kembalikan HANYA kode HTML tabel saja (mulai <table> hingga </table>), tanpa penjelasan.
 
 ${targetTable.outerHTML}`;
-      const fixedHtml = await callGemini(apiKey.trim(), prompt);
+      const fixedHtml = await callGemini(apiKey.trim(), prompt, (n) => setAiStatus(`Server sibuk, mencoba lagi (${n})...`));
       if (!fixedHtml.toLowerCase().includes("<table")) throw new Error("AI tidak mengembalikan tabel HTML yang valid.");
       const tmp = doc.createElement("div");
       tmp.innerHTML = sanitizeFragment(fixedHtml);
@@ -496,11 +527,13 @@ ${targetTable.outerHTML}`;
       if (err instanceof GeminiKeyError) {
         localStorage.removeItem("gemini_api_key");
         alert(`API Key tidak valid atau sudah dicabut (${err.message}).\nKey telah dihapus — klik tombol lagi untuk memasukkan key baru.`);
+      } else if (err instanceof GeminiBusyError) {
+        alert(`Server Gemini sedang sibuk atau kuota habis, dan sudah dicoba beberapa kali (termasuk model cadangan).\nTabel tidak diubah — silakan coba lagi beberapa menit lagi.\n\nDetail: ${err.message}`);
       } else {
         alert(`Gagal: ${err.message}`);
       }
     } finally {
-      setAiBusy(false);
+      setAiStatus(null);
     }
   };
 
@@ -535,8 +568,8 @@ ${targetTable.outerHTML}`;
           <Scissors className="w-4 h-4" /><span>Batas Halaman</span>
         </button>
         <div className="w-px h-6 bg-gray-300 self-center mx-0.5" />
-        <button id="ai-fix-btn" onClick={handleAiFixTable} disabled={aiBusy} className="flex items-center gap-1.5 p-2 px-3 rounded hover:bg-emerald-100 text-emerald-700 font-medium text-sm border border-emerald-200 disabled:opacity-60 disabled:cursor-wait" title="Rapikan tabel menggunakan AI Gemini">
-          <Sparkles className="w-4 h-4" /><span>{aiBusy ? "Memproses..." : "Rapikan Tabel (AI)"}</span>
+        <button id="ai-fix-btn" onClick={handleAiFixTable} disabled={aiStatus !== null} className="flex items-center gap-1.5 p-2 px-3 rounded hover:bg-emerald-100 text-emerald-700 font-medium text-sm border border-emerald-200 disabled:opacity-60 disabled:cursor-wait" title="Rapikan tabel menggunakan AI Gemini">
+          <Sparkles className="w-4 h-4" /><span>{aiStatus ?? "Rapikan Tabel (AI)"}</span>
         </button>
         <div className="w-px h-6 bg-gray-300 self-center mx-0.5" />
         <button onClick={handleMagicPaste} className="flex items-center gap-1.5 p-2 px-3 rounded hover:bg-purple-100 text-purple-700 font-medium text-sm" title="Paste HTML dari clipboard">
