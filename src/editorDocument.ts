@@ -6,7 +6,8 @@ import { stripPrintChrome } from "./cleanup";
 // otherwise exports carry editor visuals and old documents never pick up CSS fixes.
 export function serializeDoc(doc: Document): string {
   const root = doc.documentElement.cloneNode(true) as HTMLElement;
-  root.querySelectorAll("#agy-style, #agy-csp").forEach((el) => el.remove());
+  root.querySelectorAll("#agy-style, #agy-csp, #agy-print").forEach((el) => el.remove());
+  root.querySelectorAll("[data-agy-keep]").forEach((el) => el.removeAttribute("data-agy-keep"));
   root.querySelectorAll<HTMLElement>("td, th").forEach((cell) => {
     if (!cell.style.cursor) return;
     cell.style.cursor = "";

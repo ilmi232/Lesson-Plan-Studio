@@ -2,8 +2,8 @@
 import React, { useState } from 'react';
 import { useStore } from '../store';
 import { IframeEditor } from './IframeEditor';
-import { ArrowLeft, Download, FileType, Search } from 'lucide-react';
-import html2pdf from 'html2pdf.js';
+import { ArrowLeft, Printer, FileType, Search } from 'lucide-react';
+import { printDocument } from '../pagination';
 
 export const EditorPage: React.FC = () => {
   const { currentPlanId, plans, updatePlan, setCurrentPlanId, paperSize, setPaperSize } = useStore();
@@ -18,33 +18,12 @@ export const EditorPage: React.FC = () => {
     updatePlan(plan.id, plan.content, e.target.value);
   };
 
-  const handleExportPDF = () => {
-    const element = document.getElementById('print-content');
-    if (!element) return;
-    
-    // We need to pass the inner document body to html2pdf if we want it to render correctly,
-    // or we can pass the iframe's document body
-    const iframe = element.querySelector('iframe');
-    const targetElement = iframe ? iframe.contentDocument.documentElement : element;
-
-    let format: string | number[] = 'a4';
-    if (paperSize === 'f4') {
-      format = [215.9, 330.2]; // Custom size in mm
-    } else if (paperSize === 'letter') {
-      format = 'letter';
-    } else if (paperSize === 'legal') {
-      format = 'legal';
-    }
-
-    const opt = {
-      margin:       10,
-      filename:     `${plan.title}.pdf`,
-      image:        { type: 'jpeg', quality: 0.98 },
-      html2canvas:  { scale: 2, useCORS: true },
-      jsPDF:        { unit: 'mm', format: format, orientation: 'portrait' },
-      pagebreak:    { mode: ['css', 'legacy'] }
-    };
-    html2pdf().set(opt).from(targetElement).save();
+  // Browser print instead of an html2pdf screenshot: real (selectable) text, MathJax renders,
+  // @page paper size, and print CSS that keeps rows/boxes together and hides editor markers.
+  // "Save as PDF" in the print dialog produces the PDF.
+  const handlePrint = () => {
+    const iframe = document.querySelector<HTMLIFrameElement>('#print-content iframe');
+    if (iframe) printDocument(iframe, paperSize, plan.title);
   };
 
   const handleExportDocx = () => {
@@ -164,10 +143,10 @@ export const EditorPage: React.FC = () => {
             <FileType className="w-4 h-4" /> Export Word
           </button>
           <button
-            onClick={handleExportPDF}
+            onClick={handlePrint}
             className="flex items-center gap-2 px-3 py-2 text-white bg-blue-600 hover:bg-blue-700 rounded-md text-sm font-medium transition-colors"
           >
-            <Download className="w-4 h-4" /> Export PDF
+            <Printer className="w-4 h-4" /> Cetak / PDF
           </button>
         </div>
       </header>

@@ -5,6 +5,7 @@ import { stripPrintChrome, stripRenderedChrome, releaseArtificialHeights } from 
 import { serializeDoc, prepareForEditor, writeToIframe, onceParsed } from "../editorDocument";
 import { callGemini, getGeminiKey, describeGeminiError } from "../gemini";
 import { restructureDocument, type RestructureResult } from "../restructure";
+import { computePageStarts, PRINT_MARGIN_MM } from "../pagination";
 import { RestructurePreview } from "./RestructurePreview";
 import { buildGrid, freezeColumnWidths, insertColumnAfter, insertRowAfter, deleteColumns, deleteRows } from "../tableOps";
 import { CopyPromptButton } from "./CopyPromptButton";
@@ -29,6 +30,10 @@ const PAGE_BREAK_CSS = `
   /* The iframe is sized to its content, so viewport-based heights (min-h-screen, 100vh)
      would grow with it forever */
   html, body { height: auto !important; min-height: 0 !important; }
+
+  /* Same margins as the printed page (@page in pagination.ts), so lines wrap and page
+     guides fall where they will on paper */
+  @media screen { html { padding: ${PRINT_MARGIN_MM}mm !important; } }
 
   /* Neutralize fixed/absolute positioning that causes text overlap in iframe */
   body > div[style*="position: fixed"],
@@ -69,6 +74,7 @@ const PAGE_BREAK_CSS = `
     font-weight: bold !important;
     line-height: 20px !important;
     page-break-after: always !important;
+    break-after: page !important;
     user-select: none !important;
     pointer-events: none !important;
     position: static !important;
@@ -191,6 +197,25 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
   const [preview, setPreview] = useState<{ before: string; after: string; result: RestructureResult } | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
+  // Page guides: where the printed pages will start, recomputed shortly after layout changes
+  const [pageStarts, setPageStarts] = useState<number[]>([]);
+  const paperSizeRef = useRef(paperSize);
+  const guideTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const schedulePageGuides = () => {
+    clearTimeout(guideTimer.current);
+    guideTimer.current = setTimeout(() => {
+      const doc = iframeRef.current?.contentDocument;
+      if (!doc?.body) return;
+      const next = computePageStarts(doc, paperSizeRef.current).map(Math.round);
+      setPageStarts((prev) => (prev.length === next.length && prev.every((v, i) => v === next[i]) ? prev : next));
+    }, 300);
+  };
+  useEffect(() => {
+    paperSizeRef.current = paperSize;
+    schedulePageGuides();
+    return () => clearTimeout(guideTimer.current);
+  }, [paperSize]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Size the iframe to its content. Measured from the content itself, not scrollHeight: the
   // document's scrollHeight is never smaller than the iframe, so it could only ever grow
   // (every keystroke added 60px of blank space at the end).
@@ -205,12 +230,15 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     range.selectNodeContents(doc.body);
     const bodyStyle = win.getComputedStyle(doc.body);
     const contentBottom = range.getBoundingClientRect().bottom + win.scrollY +
-      parseFloat(bodyStyle.paddingBottom) + parseFloat(bodyStyle.marginBottom);
+      parseFloat(bodyStyle.paddingBottom) + parseFloat(bodyStyle.marginBottom) +
+      parseFloat(win.getComputedStyle(doc.documentElement).paddingBottom);
     const target = Math.max(Math.ceil(contentBottom), 300) + 60;
     const current = parseInt(iframe.style.height || "0", 10);
     if (Math.abs(target - current) > 2) iframe.style.height = `${target}px`;
     if (scrollContainer && savedScroll > 0) scrollContainer.scrollTop = savedScroll;
-  }, []);
+    schedulePageGuides();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
 
   const setupIframe = useCallback((doc: Document) => {
     doc.designMode = "on";
@@ -515,9 +543,20 @@ ${targetTable.outerHTML}`;
       </div>
 
       <div id="editor-scroll-container" className="w-full bg-[#e5e7eb] overflow-y-auto pb-20 pt-4 flex-1">
-        <div className="mx-auto bg-white shadow-lg flex flex-col" style={{ ...paperStyle, padding: 0 }} id="print-content">
+        <div className="relative mx-auto bg-white shadow-lg flex flex-col" style={{ ...paperStyle, padding: 0 }} id="print-content">
           <iframe ref={iframeRef} style={{ width: "100%", flex: "1 1 auto", border: "none", display: "block", minHeight: paperStyle.minHeight }} title="Editor" />
+          {/* Overlay outside the document, so the guides are never saved or printed */}
+          {pageStarts.map((top, i) => (
+            <div key={i} className="absolute left-0 right-0 pointer-events-none border-t-2 border-dashed border-sky-400" style={{ top }}>
+              <span className="absolute right-2 -top-3 text-[10px] font-medium text-sky-700 bg-sky-50 border border-sky-200 rounded px-1.5">
+                Halaman {i + 2}
+              </span>
+            </div>
+          ))}
         </div>
+        <p className="text-center text-xs text-gray-500 mt-3">
+          Perkiraan {pageStarts.length + 1} halaman saat dicetak — garis biru putus-putus = batas halaman otomatis.
+        </p>
       </div>
       {preview && (
         <RestructurePreview
