@@ -5,13 +5,14 @@ import { stripPrintChrome, stripRenderedChrome, releaseArtificialHeights } from 
 import { serializeDoc, prepareForEditor, writeToIframe, onceParsed } from "../editorDocument";
 import { callGemini, getGeminiKey, describeGeminiError } from "../gemini";
 import { restructureDocument, type RestructureResult } from "../restructure";
+import { flattenDocument } from "../flatten";
 import { computePageStarts, PRINT_MARGIN_MM } from "../pagination";
 import { RestructurePreview } from "./RestructurePreview";
 import { buildGrid, freezeColumnWidths, insertColumnAfter, insertRowAfter, deleteColumns, deleteRows } from "../tableOps";
 import { CopyPromptButton } from "./CopyPromptButton";
 import {
   Bold, Italic, Underline as UnderlineIcon, List, ListOrdered,
-  Undo, Redo, Wand2, Scissors, Sparkles, FileCheck2, RotateCcw
+  Undo, Redo, Wand2, Scissors, Sparkles, FileCheck2, RotateCcw, ChevronDown, Table2
 } from "lucide-react";
 
 interface IframeEditorProps {
@@ -189,11 +190,29 @@ function attachTableResizer(doc: Document) {
   });
 }
 
+const MenuItem: React.FC<{ icon: React.ReactNode; title: string; hint: string; onClick: () => void }> = ({ icon, title, hint, onClick }) => (
+  <button onClick={onClick} className="w-full flex items-start gap-2.5 px-3 py-2 text-left hover:bg-emerald-50">
+    <span className="mt-0.5 text-emerald-700">{icon}</span>
+    <span><span className="block font-medium text-gray-800">{title}</span><span className="block text-xs text-gray-500">{hint}</span></span>
+  </button>
+);
+
 export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
   const { plans, updatePlan, replaceContent, restorePreviousVersion, paperSize } = useStore();
   const plan = plans.find((p) => p.id === planId);
   // One AI task at a time; the label shows progress on the button that started it
-  const [aiTask, setAiTask] = useState<{ kind: "table" | "doc"; label: string } | null>(null);
+  const [aiTask, setAiTask] = useState<{ kind: "flatten" | "table" | "doc"; label: string } | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = (e: Event) => { if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false); };
+    // Clicks inside the editor iframe don't reach this document; they blur the window instead
+    const closeOnBlur = () => setMenuOpen(false);
+    document.addEventListener("mousedown", close);
+    window.addEventListener("blur", closeOnBlur);
+    return () => { document.removeEventListener("mousedown", close); window.removeEventListener("blur", closeOnBlur); };
+  }, [menuOpen]);
   const [preview, setPreview] = useState<{ before: string; after: string; result: RestructureResult } | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
@@ -291,24 +310,38 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     };
   }, [planId, updatePlan, adjustHeight]);
 
+  // A whole-document replacement remounts the iframe (new key) instead of reusing it:
+  // doc.open() keeps the old window alive, and scripts from the previous document (e.g. the
+  // Tailwind CDN) kept injecting their CSS into the new one.
+  const [frameKey, setFrameKey] = useState(0);
+  const pendingLoad = useRef<{ html: string; reason?: string; resolve: () => void } | null>(null);
+
   useEffect(() => {
     const iframe = iframeRef.current;
     if (!iframe || !plan) return;
     const doc = iframe.contentDocument;
     if (!doc) return;
-    if (doc.body && doc.body.innerHTML.trim().length > 0) return;
+    const pending = pendingLoad.current;
+    if (!pending && doc.body && doc.body.innerHTML.trim().length > 0) return;
 
-    writeToIframe(iframe, prepareForEditor(plan.content || ""));
+    writeToIframe(iframe, prepareForEditor(pending ? pending.html : plan.content || ""));
     let cancelled = false;
     let cleanup: (() => void) | undefined;
     onceParsed(doc, () => {
-      if (!cancelled) cleanup = setupIframe(doc);
+      if (cancelled) return;
+      if (pending) {
+        pendingLoad.current = null;
+        // Store before setupIframe: its print-toolbar cleanup may save again right away
+        if (pending.reason) replaceContent(planId, serializeDoc(doc), pending.reason);
+      }
+      cleanup = setupIframe(doc);
+      pending?.resolve();
     });
     return () => {
       cancelled = true;
       cleanup?.();
     };
-  }, [planId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [planId, frameKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const paperStyle: React.CSSProperties = (() => {
     switch (paperSize) {
@@ -379,18 +412,38 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
 
   // Replace the whole document in the editor. With a reason, the current content is kept as
   // the plan's previous version so the teacher can undo from the toolbar.
-  const loadIntoEditor = (html: string, reason?: string) => {
-    const iframe = iframeRef.current;
-    const doc = iframe?.contentDocument;
-    if (!iframe || !doc) return;
-    writeToIframe(iframe, prepareForEditor(html));
-    // doc.open() erases every event listener, so the table resizer must be re-attached
-    (doc as any)._tableResizerAttached = false;
-    onceParsed(doc, () => {
-      // Store before setupIframe: its print-toolbar cleanup may save again right away
-      if (reason) replaceContent(planId, serializeDoc(doc), reason);
-      setupIframe(doc);
-    });
+  // Resolves once the new document is parsed and the editor is set up on it.
+  const loadIntoEditor = (html: string, reason?: string) => new Promise<void>((resolve) => {
+    pendingLoad.current = { html, reason, resolve };
+    setFrameKey((k) => k + 1);
+  });
+
+  // Main "Rapikan Dokumen": no AI. Bakes the rendered look into inline styles and drops
+  // Tailwind/classes; offers the AI step only for what it can't do (grid/flex pseudo-tables).
+  const handleFlatten = async () => {
+    const doc = iframeRef.current?.contentDocument;
+    if (!doc?.body || !plan) return;
+    setMenuOpen(false);
+    setAiTask({ kind: "flatten", label: "Merapikan..." });
+    let pseudoTables = 0;
+    try {
+      const result = flattenDocument(doc, plan.title);
+      pseudoTables = result.pseudoTables;
+      await loadIntoEditor(result.html, "Rapikan Dokumen");
+    } catch (err) {
+      alert(`Gagal merapikan dokumen: ${err instanceof Error ? err.message : String(err)}\nDokumen tidak diubah.`);
+      return;
+    } finally {
+      setAiTask(null);
+    }
+    if (pseudoTables > 0 && window.confirm(
+      `Dokumen sudah dirapikan (klik "Kembalikan" untuk membatalkan).\n\n` +
+      `Masih ada ${pseudoTables} tabel semu — kolom yang dibuat dari kotak grid/flex, bukan tabel asli, ` +
+      `sehingga +Row/+Col dan geser kolom belum bisa dipakai.\n\n` +
+      `Ubah menjadi tabel asli dengan AI? (butuh Gemini API key, ada pratinjau sebelum diterapkan)`
+    )) {
+      await handleAiRestructure();
+    }
   };
 
   const handleRestoreVersion = () => {
@@ -420,6 +473,7 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
   };
 
   const handleAiFixTable = async () => {
+    setMenuOpen(false);
     const doc = iframeRef.current?.contentDocument;
     if (!doc) return;
     const cell = getSelectedCell();
@@ -463,6 +517,7 @@ ${targetTable.outerHTML}`;
   };
 
   const handleAiRestructure = async () => {
+    setMenuOpen(false);
     const doc = iframeRef.current?.contentDocument;
     if (!doc?.body || !plan) return;
     const apiKey = getGeminiKey();
@@ -520,16 +575,22 @@ ${targetTable.outerHTML}`;
           <button onClick={() => handleTableAction("delTable")} className="p-1.5 px-2 hover:bg-red-100 text-red-600" title="Hapus Tabel">Del</button>
         </div>
         <div className="w-px h-6 bg-gray-300 self-center mx-0.5" />
-        <button onClick={handleInsertPageBreak} className="flex items-center gap-1.5 p-2 px-3 rounded hover:bg-orange-100 text-orange-700 font-medium text-sm" title="Batas Halaman">
-          <Scissors className="w-4 h-4" /><span>Batas Halaman</span>
-        </button>
         <div className="w-px h-6 bg-gray-300 self-center mx-0.5" />
-        <button onClick={handleAiRestructure} disabled={aiTask !== null} className="flex items-center gap-1.5 p-2 px-3 rounded text-white bg-emerald-600 hover:bg-emerald-700 font-medium text-sm disabled:opacity-60 disabled:cursor-wait" title="Rapikan format seluruh dokumen dengan AI Gemini (tabel asli, tanpa Tailwind, siap cetak). Isi teks diperiksa otomatis dan ada pratinjau sebelum diterapkan.">
-          <FileCheck2 className="w-4 h-4" /><span>{aiTask?.kind === "doc" ? aiTask.label : "Rapikan Dokumen (AI)"}</span>
-        </button>
-        <button id="ai-fix-btn" onClick={handleAiFixTable} disabled={aiTask !== null} className="flex items-center gap-1.5 p-2 px-3 rounded hover:bg-emerald-100 text-emerald-700 font-medium text-sm border border-emerald-200 disabled:opacity-60 disabled:cursor-wait" title="Rapikan satu tabel (yang sedang diklik) dengan AI Gemini">
-          <Sparkles className="w-4 h-4" /><span>{aiTask?.kind === "table" ? aiTask.label : "Rapikan Tabel (AI)"}</span>
-        </button>
+        <div ref={menuRef} className="relative flex">
+          <button onClick={handleFlatten} disabled={aiTask !== null} className="flex items-center gap-1.5 p-2 px-3 rounded-l text-white bg-emerald-600 hover:bg-emerald-700 font-medium text-sm disabled:opacity-60 disabled:cursor-wait" title="Rapikan format dokumen tanpa AI: tampilan dipertahankan, Tailwind/class dibuang (Word export ikut rapi). Tabel semu bisa diubah jadi tabel asli dengan AI setelahnya.">
+            <FileCheck2 className="w-4 h-4" /><span>{aiTask ? aiTask.label : "Rapikan Dokumen"}</span>
+          </button>
+          <button onClick={() => setMenuOpen((o) => !o)} disabled={aiTask !== null} aria-label="Pilihan rapikan lainnya" aria-expanded={menuOpen} className="px-1.5 rounded-r text-white bg-emerald-600 hover:bg-emerald-700 border-l border-emerald-500 disabled:opacity-60">
+            <ChevronDown className="w-4 h-4" />
+          </button>
+          {menuOpen && (
+            <div className="absolute left-0 top-full mt-1 z-30 w-80 bg-white border border-gray-200 rounded-md shadow-lg py-1 text-sm">
+              <MenuItem icon={<Sparkles className="w-4 h-4" />} title="Rapikan dengan AI" hint="Seluruh dokumen: kotak grid/flex jadi tabel asli. Ada pratinjau & cek isi." onClick={handleAiRestructure} />
+              <MenuItem icon={<Table2 className="w-4 h-4" />} title="Rapikan tabel ini dengan AI" hint="Klik dulu di dalam tabel yang ingin dirapikan." onClick={handleAiFixTable} />
+              <MenuItem icon={<Scissors className="w-4 h-4" />} title="Sisipkan batas halaman" hint="Paksa pindah halaman di posisi kursor (batas otomatis sudah ada)." onClick={() => { setMenuOpen(false); handleInsertPageBreak(); }} />
+            </div>
+          )}
+        </div>
         {plan.previousVersion && (
           <button onClick={handleRestoreVersion} disabled={aiTask !== null} className="flex items-center gap-1.5 p-2 px-3 rounded hover:bg-amber-100 text-amber-700 font-medium text-sm border border-amber-200" title={`Kembalikan versi sebelum ${plan.previousVersion.reason}`}>
             <RotateCcw className="w-4 h-4" /><span>Kembalikan</span>
@@ -544,7 +605,7 @@ ${targetTable.outerHTML}`;
 
       <div id="editor-scroll-container" className="w-full bg-[#e5e7eb] overflow-y-auto pb-20 pt-4 flex-1">
         <div className="relative mx-auto bg-white shadow-lg flex flex-col" style={{ ...paperStyle, padding: 0 }} id="print-content">
-          <iframe ref={iframeRef} style={{ width: "100%", flex: "1 1 auto", border: "none", display: "block", minHeight: paperStyle.minHeight }} title="Editor" />
+          <iframe key={frameKey} ref={iframeRef} style={{ width: "100%", flex: "1 1 auto", border: "none", display: "block", minHeight: paperStyle.minHeight }} title="Editor" />
           {/* Overlay outside the document, so the guides are never saved or printed */}
           {pageStarts.map((top, i) => (
             <div key={i} className="absolute left-0 right-0 pointer-events-none border-t-2 border-dashed border-sky-400" style={{ top }}>

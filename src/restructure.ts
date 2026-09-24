@@ -98,7 +98,7 @@ export function compareWords(before: string[], after: string[]): WordDiff {
 
 // MathJax replaces $...$ with rendered markup. Put the TeX back so the AI sees (and keeps) the
 // formula; fall back to the MathML MathJax keeps for screen readers, which Chrome renders natively.
-function restoreMath(liveBody: HTMLElement, clone: HTMLElement) {
+export function restoreMath(liveBody: HTMLElement, clone: HTMLElement) {
   const texByContainer = new Map<Element, string>();
   const mathDoc = (liveBody.ownerDocument.defaultView as any)?.MathJax?.startup?.document;
   try {
