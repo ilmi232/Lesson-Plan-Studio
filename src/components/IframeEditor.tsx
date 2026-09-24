@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useCallback, useState } from "react";
 import { useStore } from "../store";
-import { sanitizeDocument, sanitizeFragment, EDITOR_CSP } from "../sanitize";
-import { buildGrid, insertColumnAfter, insertRowAfter, deleteColumns, deleteRows } from "../tableOps";
+import { sanitizeTree, sanitizeFragment, EDITOR_CSP } from "../sanitize";
+import { stripPrintChrome, stripRenderedChrome } from "../cleanup";
+import { buildGrid, freezeColumnWidths, insertColumnAfter, insertRowAfter, deleteColumns, deleteRows } from "../tableOps";
+import { CopyPromptButton } from "./CopyPromptButton";
 import {
   Bold, Italic, Underline as UnderlineIcon, List, ListOrdered,
   Undo, Redo, Wand2, Scissors, Sparkles
@@ -95,12 +97,15 @@ const DEFAULT_TEMPLATE = (body: string) => `<html><head>
   </head><body>${body}</body></html>`;
 
 // Turn stored/pasted HTML into a safe full document for the iframe: wrap fragments in the
-// default template, strip AI print bars (.no-print) and editor-only elements saved by older
-// versions, sanitize, and put the CSP first in <head> so it covers everything after it.
+// default template, strip AI print toolbars (before sanitizing, which removes their onclick)
+// and editor-only elements saved by older versions, sanitize, and put the CSP first in <head>
+// so it covers everything after it.
 function prepareForEditor(html: string): string {
   const source = html.toLowerCase().includes("<html") ? html : DEFAULT_TEMPLATE(html);
-  const parsed = sanitizeDocument(source);
-  parsed.querySelectorAll(".no-print, #agy-style, #agy-csp").forEach((el) => el.remove());
+  const parsed = new DOMParser().parseFromString(source, "text/html");
+  stripPrintChrome(parsed.body);
+  sanitizeTree(parsed);
+  parsed.querySelectorAll("#agy-style, #agy-csp").forEach((el) => el.remove());
   const csp = parsed.createElement("meta");
   csp.id = "agy-csp";
   csp.httpEquiv = "Content-Security-Policy";
@@ -199,45 +204,17 @@ function attachTableResizer(doc: Document) {
   let startX = 0;
   let startY = 0;
 
-  function getCols(table: HTMLTableElement): HTMLElement[] {
-    let colgroup = table.querySelector("colgroup");
-    if (!colgroup) {
-      colgroup = doc.createElement("colgroup");
-      let maxCols = 0;
-      let templateRow: HTMLTableRowElement | null = null;
-      for (let i = 0; i < table.rows.length; i++) {
-        let cols = 0;
-        for (let j = 0; j < table.rows[i].cells.length; j++) {
-          cols += table.rows[i].cells[j].colSpan || 1;
-        }
-        if (cols > maxCols) { maxCols = cols; templateRow = table.rows[i]; }
-      }
-      for (let i = 0; i < maxCols; i++) colgroup.appendChild(doc.createElement("col"));
-      if (templateRow) {
-        let colIdx = 0;
-        for (let i = 0; i < templateRow.cells.length; i++) {
-          const c = templateRow.cells[i];
-          const span = c.colSpan || 1;
-          const w = parseInt(doc.defaultView?.getComputedStyle(c).width || "0", 10) / span;
-          for (let s = 0; s < span; s++) {
-            const col = colgroup.children[colIdx] as HTMLElement;
-            if (col) col.style.width = w + "px";
-            colIdx++;
-          }
-        }
-      }
-      table.insertBefore(colgroup, table.firstChild);
-    }
-    return Array.from(colgroup.querySelectorAll("col")) as HTMLElement[];
-  }
-
   doc.addEventListener("mousemove", (e) => {
     if (isResizingCol) {
       const state = (doc as any)._resizeCols;
       if (!state) return;
-      const dx = e.clientX - startX;
-      if (state.leftCol) state.leftCol.style.width = `${Math.max(20, state.startWidth + dx)}px`;
-      if (state.rightCol) state.rightCol.style.width = `${Math.max(20, state.startNextWidth - dx)}px`;
+      // Widths are percentages: move the border between the two columns, keeping their sum
+      const pair = state.startLeft + state.startRight;
+      const minPct = (20 / state.tableWidth) * 100;
+      const delta = ((e.clientX - startX) / state.tableWidth) * 100;
+      const left = Math.min(Math.max(state.startLeft + delta, minPct), pair - minPct);
+      state.leftCol.style.width = `${left.toFixed(2)}%`;
+      state.rightCol.style.width = `${(pair - left).toFixed(2)}%`;
       return;
     }
     if (isResizingRow) {
@@ -279,21 +256,22 @@ function attachTableResizer(doc: Document) {
     if (!table) return;
 
     if (resizeMode === "col") {
-      const cols = getCols(table);
-      // Visual column from the grid, so cells spanned by a rowspan above are accounted for
-      const colIndex = buildGrid(table).pos.get(currentCell as HTMLTableCellElement)?.col ?? 0;
-      const span = (currentCell as HTMLTableCellElement).colSpan || 1;
-      const leftColIdx = colIndex + span - 1;
-      const rightColIdx = leftColIdx + 1;
-      const leftCol = cols[leftColIdx] as HTMLElement | undefined;
-      const rightCol = cols[rightColIdx] as HTMLElement | undefined;
-      if (!leftCol) return;
+      // Visual column from the grid, so merged cells (colspan/rowspan) are accounted for
+      const { pos, width } = buildGrid(table);
+      const colIndex = pos.get(currentCell as HTMLTableCellElement)?.col ?? 0;
+      const leftColIdx = colIndex + ((currentCell as HTMLTableCellElement).colSpan || 1) - 1;
+      // The table's outer right edge has no neighbour to trade width with; the table keeps its width
+      if (leftColIdx + 1 >= width) return;
+      const cols = freezeColumnWidths(table);
       isResizingCol = true;
       startX = e.clientX;
-      const getW = (col: HTMLElement) =>
-        parseInt(col.style.width || doc.defaultView?.getComputedStyle(col).width || "0", 10);
-      (doc as any)._resizeCols = { leftCol, rightCol, startWidth: getW(leftCol), startNextWidth: rightCol ? getW(rightCol) : 0 };
-      table.style.tableLayout = "fixed";
+      (doc as any)._resizeCols = {
+        leftCol: cols[leftColIdx],
+        rightCol: cols[leftColIdx + 1],
+        startLeft: parseFloat(cols[leftColIdx].style.width),
+        startRight: parseFloat(cols[leftColIdx + 1].style.width),
+        tableWidth: table.getBoundingClientRect().width,
+      };
       e.preventDefault();
     } else if (resizeMode === "row") {
       isResizingRow = true;
@@ -365,6 +343,14 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     observer.observe(doc.body, { childList: true, subtree: true, characterData: true, attributes: true });
     (doc as any)._heightObserver = observer;
 
+    // Print toolbars only detectable once rendered; run again after the Tailwind CDN,
+    // which generates its styles after DOMContentLoaded, has styled the page.
+    const cleanRendered = () => {
+      if (stripRenderedChrome(doc) > 0) updatePlan(planId, serializeDoc(doc));
+    };
+    cleanRendered();
+    const cleanTimer = setTimeout(cleanRendered, 1500);
+
     setTimeout(() => adjustHeight(true), 150);
     setTimeout(() => adjustHeight(), 800);
     setTimeout(() => adjustHeight(), 2500);
@@ -372,6 +358,7 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     return () => {
       doc.removeEventListener("input", newHandler);
       observer.disconnect();
+      clearTimeout(cleanTimer);
     };
   }, [planId, updatePlan, adjustHeight]);
 
@@ -477,7 +464,9 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
           updatePlan(planId, serializeDoc(doc));
         });
       } else {
-        exec("insertHTML", sanitizeFragment(cleaned));
+        const fragment = new DOMParser().parseFromString(cleaned, "text/html");
+        stripPrintChrome(fragment.body);
+        exec("insertHTML", sanitizeFragment(fragment.body.innerHTML));
       }
     } catch {
       alert("Gagal membaca clipboard. Pastikan izin clipboard sudah diberikan.");
@@ -575,6 +564,7 @@ ${targetTable.outerHTML}`;
         <button onClick={handleMagicPaste} className="flex items-center gap-1.5 p-2 px-3 rounded hover:bg-purple-100 text-purple-700 font-medium text-sm" title="Paste HTML dari clipboard">
           <Wand2 className="w-4 h-4" /><span>Magic Paste</span>
         </button>
+        <CopyPromptButton className="flex items-center gap-1.5 p-2 px-3 rounded hover:bg-purple-100 text-purple-700 font-medium text-sm border border-purple-200" />
       </div>
 
       <div id="editor-scroll-container" className="w-full bg-[#e5e7eb] overflow-y-auto pb-20 pt-4 flex-1">

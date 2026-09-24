@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { useStore, useSaveStatus, STORAGE_LIMIT_CHARS } from '../store';
 import { downloadBackup, parseBackup } from '../backup';
+import { CopyPromptButton } from './CopyPromptButton';
 import { FileText, Plus, Trash2, Copy, Edit2, Download, Upload, HardDrive } from 'lucide-react';
 
 const BACKUP_REMINDER_MS = 7 * 24 * 60 * 60 * 1000;
@@ -119,6 +120,12 @@ export const Dashboard: React.FC = () => {
             Buat
           </button>
         </form>
+        <div className="mt-4 pt-4 border-t border-gray-100 flex flex-wrap items-center gap-3 text-sm text-gray-600">
+          <CopyPromptButton className="flex items-center gap-2 px-3 py-1.5 font-medium text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-md" />
+          <span className="flex-1 min-w-60">
+            Membuat RPP dengan ChatGPT / AI Studio? Tempel prompt ini ke AI, lalu masukkan hasilnya dengan <b>Magic Paste</b> — tabel dan tata letaknya akan jauh lebih rapi.
+          </span>
+        </div>
       </div>
 
       <div className="grid gap-4">

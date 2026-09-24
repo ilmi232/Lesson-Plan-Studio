@@ -36,7 +36,7 @@ function isDangerousUrl(value: string): boolean {
   return /^(javascript|vbscript):/.test(normalized) || normalized.startsWith('data:text/html');
 }
 
-function sanitizeTree(root: ParentNode) {
+export function sanitizeTree(root: ParentNode) {
   root.querySelectorAll('script').forEach((script) => {
     const src = script.getAttribute('src');
     if (!src || !isTrustedScript(src)) script.remove();
@@ -50,13 +50,6 @@ function sanitizeTree(root: ParentNode) {
       }
     }
   });
-}
-
-// For a complete document: returns the parsed, sanitized Document for further processing.
-export function sanitizeDocument(html: string): Document {
-  const doc = new DOMParser().parseFromString(html, 'text/html');
-  sanitizeTree(doc);
-  return doc;
 }
 
 // For HTML fragments inserted into an existing document (paste, AI output).

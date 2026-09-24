@@ -51,6 +51,72 @@ function simpleCols(table: HTMLTableElement, width: number): HTMLTableColElement
   return cols.length === width && cols.every((c) => c.span === 1) ? cols : null;
 }
 
+// Tailwind width utilities, with optional variant prefixes (md:w-1/2, print:w-full)
+const WIDTH_CLASS = /^(?:[\w-]+:)*(?:w|min-w|max-w)-/;
+
+function stripWidthConstraints(el: HTMLElement) {
+  el.style.removeProperty("width");
+  el.style.removeProperty("min-width");
+  el.style.removeProperty("max-width");
+  el.removeAttribute("width");
+  Array.from(el.classList).forEach((c) => { if (WIDTH_CLASS.test(c)) el.classList.remove(c); });
+  if (!el.getAttribute("class")) el.removeAttribute("class");
+  if (!el.getAttribute("style")) el.removeAttribute("style");
+}
+
+// AI tables set widths in ways that fight the column resizer: percent <col>s (read as px),
+// <col span>, w-1/4 classes or width attributes on cells, colspan in the first row.
+// Replace all of that with the widths as rendered right now, as percentages on a fresh
+// <colgroup> (percent, not px, so the table still fits the narrower print area).
+// Returns the <col> per visual column.
+export function freezeColumnWidths(table: HTMLTableElement): HTMLTableColElement[] {
+  const { pos, width } = buildGrid(table);
+  const cells = Array.from(pos.keys());
+  const measured: (number | null)[] = Array(width).fill(null);
+  for (const cell of cells) {
+    const { col } = pos.get(cell)!;
+    if (span(cell).cols === 1 && measured[col] === null) measured[col] = cell.getBoundingClientRect().width;
+  }
+  // Columns covered only by merged cells: split what remains of the merged cell's width
+  for (const cell of cells) {
+    const { col } = pos.get(cell)!;
+    const range = Array.from({ length: span(cell).cols }, (_, i) => col + i).filter((c) => c < width);
+    const unknown = range.filter((c) => measured[c] === null);
+    if (unknown.length === 0) continue;
+    const known = range.reduce((sum, c) => sum + (measured[c] ?? 0), 0);
+    const share = Math.max(20, (cell.getBoundingClientRect().width - known) / unknown.length);
+    unknown.forEach((c) => (measured[c] = share));
+  }
+  const pixels = measured.map((w) => w ?? 20);
+  const total = pixels.reduce((a, b) => a + b, 0) || 1;
+
+  // Keep the table's current size relative to its container, so fixed layout has a real width
+  const parent = table.parentElement;
+  if (parent) {
+    const cs = parent.ownerDocument.defaultView!.getComputedStyle(parent);
+    const inner = parent.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    const pct = inner > 0 ? (table.getBoundingClientRect().width / inner) * 100 : 100;
+    stripWidthConstraints(table);
+    table.style.width = pct >= 99 ? "100%" : `${pct.toFixed(2)}%`;
+  }
+  table.style.tableLayout = "fixed";
+
+  table.querySelectorAll(":scope > colgroup").forEach((g) => g.remove());
+  const doc = table.ownerDocument;
+  const group = doc.createElement("colgroup");
+  const cols = pixels.map((px) => {
+    const col = doc.createElement("col");
+    col.style.width = `${((px / total) * 100).toFixed(2)}%`;
+    group.appendChild(col);
+    return col;
+  });
+  if (table.caption) table.caption.after(group);
+  else table.prepend(group);
+
+  cells.forEach(stripWidthConstraints);
+  return cols;
+}
+
 export function insertColumnAfter(table: HTMLTableElement, cell: Cell) {
   const { grid, pos, width } = buildGrid(table);
   const target = pos.get(cell)!.col + span(cell).cols - 1;
