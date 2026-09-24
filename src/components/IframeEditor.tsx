@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useCallback, useState } from "react";
 import { useStore } from "../store";
 import { sanitizeFragment } from "../sanitize";
-import { stripPrintChrome, stripRenderedChrome, releaseArtificialHeights } from "../cleanup";
+import { stripPrintChrome, stripRenderedChrome, releaseArtificialHeights, fitToPageWidth } from "../cleanup";
 import { serializeDoc, prepareForEditor, writeToIframe, onceParsed } from "../editorDocument";
 import { callGemini, getGeminiKey, describeGeminiError } from "../gemini";
 import { restructureDocument, type RestructureResult } from "../restructure";
@@ -31,6 +31,10 @@ const PAGE_BREAK_CSS = `
   /* The iframe is sized to its content, so viewport-based heights (min-h-screen, 100vh)
      would grow with it forever */
   html, body { height: auto !important; min-height: 0 !important; }
+
+  /* The page itself is paper: a web page's grey/colored background around its "paper"
+     container would show as strips beside the text (and waste ink) */
+  html, body { background: #fff !important; }
 
   /* Same margins as the printed page (@page in pagination.ts), so lines wrap and page
      guides fall where they will on paper */
@@ -364,7 +368,7 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     // Print toolbars only detectable once rendered; run again after the Tailwind CDN,
     // which generates its styles after DOMContentLoaded, has styled the page.
     const cleanRendered = () => {
-      if (stripRenderedChrome(doc) + releaseArtificialHeights(doc) > 0) {
+      if (stripRenderedChrome(doc) + releaseArtificialHeights(doc) + fitToPageWidth(doc) > 0) {
         updatePlan(planId, serializeDoc(doc));
         adjustHeight();
       }

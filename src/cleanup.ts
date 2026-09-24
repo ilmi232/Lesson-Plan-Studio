@@ -104,6 +104,54 @@ export function releaseArtificialHeights(doc: Document): number {
   return changed;
 }
 
+const px = (v: string) => parseFloat(v) || 0;
+
+function contentRight(el: Element, win: Window): number {
+  const cs = win.getComputedStyle(el);
+  return el.getBoundingClientRect().right - px(cs.paddingRight) - px(cs.borderRightWidth);
+}
+
+// AI pages often use a fixed-width "paper" container (e.g. 900px, or 210mm plus padding) that
+// is wider than the printable width of the page: the right side was cut off in the editor and
+// on paper. Shrink whatever sticks out of its parent. Saved with the document (print needs it).
+// Returns the number of elements changed.
+export function fitToPageWidth(doc: Document): number {
+  const win = doc.defaultView;
+  if (!win || !doc.body) return 0;
+  let changed = 0;
+  // Document order: fixing a container usually brings its children back inside too
+  for (const el of Array.from(doc.body.querySelectorAll<HTMLElement>("*"))) {
+    if (!el.isConnected || el.closest("[data-agy-gap], mjx-container, svg *, math, .page-break") ||
+        /^(THEAD|TBODY|TFOOT|TR|TD|TH|COL|COLGROUP|CAPTION)$/.test(el.tagName)) continue;
+    const parent = el.parentElement;
+    if (!parent) continue;
+    const cs = win.getComputedStyle(el);
+    if (cs.display === "none" || cs.display === "inline" || cs.position === "absolute") continue;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.right <= contentRight(parent, win) + 1) continue;
+    if (/^(IMG|SVG|VIDEO|CANVAS)$/.test(el.tagName)) {
+      el.style.setProperty("max-width", "100%");
+      el.style.setProperty("height", "auto");
+    } else if (el.tagName === "TABLE") {
+      el.style.setProperty("width", "100%");
+      el.style.setProperty("max-width", "100%");
+      // Content that can't shrink (long words, many columns): fix the layout and wrap anywhere
+      if (el.getBoundingClientRect().right > contentRight(parent, win) + 1) {
+        el.style.setProperty("table-layout", "fixed");
+        el.style.setProperty("overflow-wrap", "anywhere");
+      }
+    } else {
+      el.style.setProperty("max-width", "100%");
+      el.style.setProperty("box-sizing", "border-box");
+      if (px(cs.marginLeft) > 0 && el.getBoundingClientRect().right > contentRight(parent, win) + 1) {
+        el.style.setProperty("margin-left", "0");
+      }
+    }
+    changed++;
+  }
+  return changed;
+}
+
 // Run inside the rendered iframe: catches what only the browser knows — the document's own
 // @media print rules with made-up class names, and computed fixed/sticky positioning.
 // Returns the number of elements changed.

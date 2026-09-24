@@ -304,7 +304,8 @@ export function layoutSheets(doc: Document, paperSize: string): SheetLayout {
       }
       // Boxes continue to the bottom of the page (their background does on paper too); a table
       // split between rows ends at its last row
-      if (gap.tagName === "TR") sheet.blankFrom = Math.min(pageBottom, top(gap));
+      // (+2px: a collapsed border sits on the row edge and belongs to the last row)
+      if (gap.tagName === "TR") sheet.blankFrom = Math.min(pageBottom, top(gap) + 2);
       breakEls.push(target);
       sheetTop = nextSheetTop;
       pageTop = wanted;
