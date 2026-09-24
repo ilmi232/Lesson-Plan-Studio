@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useCallback } from "react";
 import { useStore } from "../store";
+import { sanitizeDocument, sanitizeFragment, EDITOR_CSP } from "../sanitize";
 import {
   Bold, Italic, Underline as UnderlineIcon, List, ListOrdered,
   Undo, Redo, Wand2, Scissors, Sparkles
@@ -77,7 +78,7 @@ const PAGE_BREAK_CSS = `
 // otherwise exports carry editor visuals and old documents never pick up CSS fixes.
 function serializeDoc(doc: Document): string {
   const root = doc.documentElement.cloneNode(true) as HTMLElement;
-  root.querySelector("#agy-style")?.remove();
+  root.querySelectorAll("#agy-style, #agy-csp").forEach((el) => el.remove());
   root.querySelectorAll<HTMLElement>("td, th").forEach((cell) => {
     if (!cell.style.cursor) return;
     cell.style.cursor = "";
@@ -86,11 +87,42 @@ function serializeDoc(doc: Document): string {
   return root.outerHTML;
 }
 
-// Strip AI print bars (.no-print) and any editor CSS saved by older versions.
-function cleanHtml(html: string): string {
-  const parsed = new DOMParser().parseFromString(html, "text/html");
-  parsed.querySelectorAll(".no-print, #agy-style").forEach((el) => el.remove());
-  return html.toLowerCase().includes("<html") ? parsed.documentElement.outerHTML : parsed.body.innerHTML;
+const DEFAULT_TEMPLATE = (body: string) => `<html><head>
+  <meta charset="utf-8">
+  <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+  <style>body { font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif; padding: 20px; line-height: 1.5; } table { border-collapse: collapse; width: 100%; } table, th, td { border: 1px solid #ccc; padding: 8px; }</style>
+  </head><body>${body}</body></html>`;
+
+// Turn stored/pasted HTML into a safe full document for the iframe: wrap fragments in the
+// default template, strip AI print bars (.no-print) and editor-only elements saved by older
+// versions, sanitize, and put the CSP first in <head> so it covers everything after it.
+function prepareForEditor(html: string): string {
+  const source = html.toLowerCase().includes("<html") ? html : DEFAULT_TEMPLATE(html);
+  const parsed = sanitizeDocument(source);
+  parsed.querySelectorAll(".no-print, #agy-style, #agy-csp").forEach((el) => el.remove());
+  const csp = parsed.createElement("meta");
+  csp.id = "agy-csp";
+  csp.httpEquiv = "Content-Security-Policy";
+  csp.content = EDITOR_CSP;
+  parsed.head.prepend(csp);
+  return parsed.documentElement.outerHTML;
+}
+
+function writeToIframe(iframe: HTMLIFrameElement, html: string) {
+  const doc = iframe.contentDocument!;
+  doc.open();
+  // MathJax reads its config from window.MathJax. Set it from here, because inline
+  // <script> config is stripped by the sanitizer and blocked by the CSP.
+  (iframe.contentWindow as any).MathJax = { tex: { inlineMath: [["$", "$"], ["\\(", "\\)"]] } };
+  doc.write(html);
+  doc.close();
+}
+
+// A blocking <script src> in <head> (e.g. the Tailwind CDN) pauses the parser, so right
+// after doc.close() the document may not have a <body> yet.
+function onceParsed(doc: Document, fn: () => void) {
+  if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", fn, { once: true });
+  else fn();
 }
 
 async function callGemini(apiKey: string, prompt: string): Promise<string> {
@@ -308,21 +340,16 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
     if (!doc) return;
     if (doc.body && doc.body.innerHTML.trim().length > 0) return;
 
-    let content = cleanHtml(plan.content || "");
-
-    if (!content.toLowerCase().includes("<html")) {
-      content = `<!DOCTYPE html><html><head>
-        <meta charset="utf-8">
-        <script>MathJax = { tex: { inlineMath: [["$","$"],["\\\\(","\\\\)"]] } };<\/script>
-        <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"><\/script>
-        <style>body { font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif; padding: 20px; line-height: 1.5; } table { border-collapse: collapse; width: 100%; } table, th, td { border: 1px solid #ccc; padding: 8px; }</style>
-        </head><body>${content}</body></html>`;
-    }
-
-    doc.open();
-    doc.write(content);
-    doc.close();
-    return setupIframe(doc);
+    writeToIframe(iframe, prepareForEditor(plan.content || ""));
+    let cancelled = false;
+    let cleanup: (() => void) | undefined;
+    onceParsed(doc, () => {
+      if (!cancelled) cleanup = setupIframe(doc);
+    });
+    return () => {
+      cancelled = true;
+      cleanup?.();
+    };
   }, [planId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const paperStyle: React.CSSProperties = (() => {
@@ -399,19 +426,20 @@ export const IframeEditor: React.FC<IframeEditorProps> = ({ planId }) => {
   const handleMagicPaste = async () => {
     try {
       const text = await navigator.clipboard.readText();
-      let cleaned = text.replace(/```html\s*/gi, "").replace(/```\s*/g, "").trim();
-      const doc = iframeRef.current?.contentDocument;
-      if (!doc) return;
+      const cleaned = text.replace(/```html\s*/gi, "").replace(/```\s*/g, "").trim();
+      const iframe = iframeRef.current;
+      const doc = iframe?.contentDocument;
+      if (!iframe || !doc) return;
       if (cleaned.toLowerCase().includes("<html")) {
-        cleaned = cleanHtml(cleaned);
-
-        doc.open(); doc.write(cleaned); doc.close();
+        writeToIframe(iframe, prepareForEditor(cleaned));
         // doc.open() erases every event listener, so the table resizer must be re-attached
         (doc as any)._tableResizerAttached = false;
-        setupIframe(doc);
-        updatePlan(planId, serializeDoc(doc));
+        onceParsed(doc, () => {
+          setupIframe(doc);
+          updatePlan(planId, serializeDoc(doc));
+        });
       } else {
-        exec("insertHTML", cleaned);
+        exec("insertHTML", sanitizeFragment(cleaned));
       }
     } catch {
       alert("Gagal membaca clipboard. Pastikan izin clipboard sudah diberikan.");
@@ -451,7 +479,7 @@ ${targetTable.outerHTML}`;
       const fixedHtml = await callGemini(apiKey.trim(), prompt);
       if (!fixedHtml.toLowerCase().includes("<table")) throw new Error("AI tidak mengembalikan tabel HTML yang valid.");
       const tmp = doc.createElement("div");
-      tmp.innerHTML = fixedHtml;
+      tmp.innerHTML = sanitizeFragment(fixedHtml);
       const newTable = tmp.querySelector("table");
       if (newTable) {
         targetTable.replaceWith(newTable);
